@@ -1,0 +1,12 @@
+# MCP runtime state (tracked up-process metadata + captured logs)
+.run/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
