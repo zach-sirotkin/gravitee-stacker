@@ -14,6 +14,22 @@ Documents/
   gamma-stack-mcp/              ← this MCP server
 ```
 
+## What you need to run it
+
+This project is only the **wrapper**. Each user assembles it with things that live
+outside this repo:
+
+- **The stack repo** — a local checkout of `gravitee-gamma-modules-sdk` (this tool
+  drives its `docker/run.sh`). Point `GAMMA_STACK_DIR` at it.
+- **Docker Desktop** running.
+- **Registry access** — `az acr login --name graviteeio`, or set `REGISTRY=graviteeio`
+  in `docker/.env` for the public hub — plus a **license** at `docker/license/license.key`.
+- **macOS or Linux**, **Python 3.10+**. (The port pre-flight uses `lsof` and process
+  detach uses POSIX APIs — not Windows. The `*_daemon` tools are macOS-specific.)
+
+Nothing secret is committed: `.venv/` and `.run/` (state + logs + generated overlay)
+are gitignored.
+
 ## What it exposes
 
 | Tool                     | What it does                                                                                 |
@@ -50,7 +66,7 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 
 | Env var          | Default                                                     | Meaning                                    |
 | ---------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| `GAMMA_STACK_DIR`| `/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk` | Stack repo root. All calls run in `$GAMMA_STACK_DIR/docker`. |
+| `GAMMA_STACK_DIR`| `~/gravitee-gamma-modules-sdk` (override this) | Path to your checkout of the stack repo. All calls run in `$GAMMA_STACK_DIR/docker`. |
 | `ESM_MESH`       | unset                                                      | If set, adds the ESM Kafka-mesh overlay (matches `run.sh`). |
 | `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
 | `GAMMA_PORT_OFFSET` | `20000`                                                | Host-port shift used in **coexist** mode (see **Ports** below). |
@@ -126,18 +142,19 @@ mid-startup failure.
 ## Install / run
 
 ```bash
-cd /Users/zachary.sirotkin/Documents/gamma-stack-mcp
-python3 -m venv .venv
+git clone <this-repo-url> gamma-stack-mcp
+cd gamma-stack-mcp
+python3 -m venv .venv          # Python 3.10+
 ./.venv/bin/python -m pip install -e .
 ```
 
 Run the server directly (stdio transport):
 
 ```bash
-GAMMA_STACK_DIR=/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk \
+GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk \
   ./.venv/bin/python -m gamma_stack_mcp.server
 # or, via the installed console script:
-./.venv/bin/gamma-stack-mcp
+GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk ./.venv/bin/gamma-stack-mcp
 ```
 
 ## Wire it into a client
@@ -152,10 +169,10 @@ Add to `~/.claude.json` (or a project `.mcp.json`) under `mcpServers`:
 {
   "mcpServers": {
     "gamma-stack": {
-      "command": "/Users/zachary.sirotkin/Documents/gamma-stack-mcp/.venv/bin/python",
+      "command": "/ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python",
       "args": ["-m", "gamma_stack_mcp.server"],
       "env": {
-        "GAMMA_STACK_DIR": "/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk"
+        "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk"
       }
     }
   }
@@ -166,9 +183,14 @@ Or with the CLI:
 
 ```bash
 claude mcp add gamma-stack \
-  --env GAMMA_STACK_DIR=/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk \
-  -- /Users/zachary.sirotkin/Documents/gamma-stack-mcp/.venv/bin/python -m gamma_stack_mcp.server
+  --env GAMMA_STACK_DIR=/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk \
+  -- /ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python -m gamma_stack_mcp.server
 ```
+
+> **Paths in the JSON must be absolute** — MCP clients don't expand `~` or `$HOME`.
+> Point `command` at this project's `.venv/bin/python` and `GAMMA_STACK_DIR` at your
+> local checkout of the stack repo. (If you `pipx install` this project, `command`
+> can just be `gamma-stack-mcp`.)
 
 ### Cursor
 
@@ -178,10 +200,10 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 {
   "mcpServers": {
     "gamma-stack": {
-      "command": "/Users/zachary.sirotkin/Documents/gamma-stack-mcp/.venv/bin/python",
+      "command": "/ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python",
       "args": ["-m", "gamma_stack_mcp.server"],
       "env": {
-        "GAMMA_STACK_DIR": "/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk"
+        "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk"
       }
     }
   }

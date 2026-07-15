@@ -18,7 +18,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_STACK_DIR = "/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk"
+# Neutral fallback used only when GAMMA_STACK_DIR is unset. In practice the MCP
+# client config always sets GAMMA_STACK_DIR; if it's wrong/unset, check_environment
+# reports a clear "set GAMMA_STACK_DIR" message rather than failing cryptically.
+DEFAULT_STACK_DIR = "~/gravitee-gamma-modules-sdk"
 
 
 # ── Paths / config ────────────────────────────────────────────────────────────
