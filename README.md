@@ -52,7 +52,41 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 | `GAMMA_STACK_DIR`| `/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk` | Stack repo root. All calls run in `$GAMMA_STACK_DIR/docker`. |
 | `ESM_MESH`       | unset                                                      | If set, adds the ESM Kafka-mesh overlay (matches `run.sh`). |
 | `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
-| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` are kept.  |
+| `GAMMA_PORT_OFFSET` | `20000`                                                | Host-port shift applied on `stack_up` (see **Ports** below). `0` disables remap. |
+| `GAMMA_PORT_KEEP`   | unset                                                  | Comma-separated services to leave on their original host ports (e.g. `nginx`). |
+| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` + generated overlay are kept. |
+
+### Ports — never collide with your other stacks
+
+The Gamma stack's published host ports are **hardcoded** in the stack repo's
+compose files (`'8082:8082'`, `'8083:8083'`, `'80:80'`, …) and `run.sh` takes no
+overlay, so they can't be remapped as a pure wrapper. Instead, `stack_up` **shifts
+every published host port by `GAMMA_PORT_OFFSET` (default 20000)** using a generated
+compose overlay (`.run/ports.override.yml`, built from `docker compose config` so it
+tracks whatever the stack actually publishes) applied with the `!override` tag. In
+this mode the up path drives `docker compose` directly (pull + `up -d`, still
+non-blocking); `setup`/`down`/`logs`/`status` are unaffected.
+
+Default mapping (offset 20000):
+
+| Service        | Original | Remapped | | Service       | Original | Remapped |
+| -------------- | -------- | -------- |-| ------------- | -------- | -------- |
+| nginx (UIs)    | 80       | 20080    | | gateway (AM)  | 8092     | 28092    |
+| apim-gateway   | 8082     | 28082    | | management(AM)| 8093     | 28093    |
+| apim-rest-api  | 8083     | 28083    | | apim-es       | 9200     | 29200    |
+| apim-mongo     | 27017    | 47017    | | AM mongo      | 27018    | 47018    |
+
+…and the 18xxx debug/reactor/SPIRE ports shift into the 38xxx band. None of these
+collide with `apim-latest` (8082–8085) or `gravitee-am-local` (8086).
+
+- **UIs move with nginx:** `http://gamma.localhost:20080`, `apim.localhost:20080`, etc.
+- **Caveat:** OAuth/redirect URIs registered by `stack_setup` assume nginx on `:80`.
+  If a login flow misbehaves on the remapped port, run with `GAMMA_PORT_KEEP=nginx`
+  to keep nginx on `:80` (it doesn't conflict with the attached stacks anyway).
+- **Edge Daemon:** if you remap and then install the daemon, point it at the new
+  reactor port via `EDGE_REACTOR_PORT` (default reactor is 18072 → remapped 38072).
+- **Disable entirely:** `GAMMA_PORT_OFFSET=0` → `stack_up` uses the plain `run.sh`
+  path with original ports.
 
 Runtime state (the tracked up-process metadata + `up.log`) lives in **this
 project's** `.run/` directory (gitignored here) — deliberately kept out of the

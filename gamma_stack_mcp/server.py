@@ -145,14 +145,19 @@ def _overall_hint(overall: str) -> str:
 def stack_up(pull: bool = True) -> dict:
     """Start the Gamma demo stack in the background (non-blocking).
 
-    Launches `bash run.sh` via a detached subprocess (pull + `docker compose up -d`
-    + health poll), redirecting output to .run/up.log, and returns immediately —
-    it never waits, so cold image pulls won't time out your MCP client. Poll
-    `stack_status` to learn when the stack is actually ready.
+    Launches the up in a detached subprocess, redirecting output to .run/up.log,
+    and returns immediately — it never waits, so cold image pulls won't time out
+    your MCP client. Poll `stack_status` to learn when the stack is actually ready.
+
+    Ports: by default every published host port is shifted by GAMMA_PORT_OFFSET
+    (default 20000) via a generated compose overlay, so the stack never collides
+    with other local stacks. The remap path drives `docker compose` directly (the
+    stack's ports are hardcoded and run.sh takes no overlay). Set GAMMA_PORT_OFFSET=0
+    to disable remapping and use the plain `run.sh` path instead. GAMMA_PORT_KEEP
+    (comma-separated services) leaves those on their original ports.
 
     Args:
-        pull: Pull images first (default). False -> `run.sh --no-pull`, using
-              whatever images are already cached locally.
+        pull: Pull images first (default). False uses whatever images are cached.
 
     Only one up at a time: if a tracked up-process is still running this refuses
     and points you at stack_status.
@@ -170,27 +175,98 @@ def stack_up(pull: bool = True) -> dict:
     if not env["ok"]:
         return {
             "status": "blocked",
-            "message": "Pre-flight checks failed; not launching run.sh.",
+            "message": "Pre-flight checks failed; not launching.",
             "problems": env["problems"],
             "warnings": env["warnings"],
         }
 
-    args = [] if pull else ["--no-pull"]
+    offset = runner.port_offset()
     log_path = runner.up_log_path()
-    log_path.write_bytes(b"")  # truncate previous run's log
-    proc = runner.launch_background(args, log_path)
+
+    # ── Plain run.sh path (remap disabled) ──────────────────────────────────
+    if offset == 0:
+        args = [] if pull else ["--no-pull"]
+        log_path.write_bytes(b"")
+        proc = runner.launch_background(args, log_path)
+        started = _now_iso()
+        state.record_up(proc, log_path, args, started)
+        return {
+            "status": "starting", "mode": "run.sh", "pid": proc.pid,
+            "log_path": str(log_path), "pull": pull, "started": started,
+            "warnings": env["warnings"],
+            "next": "Poll stack_status to see when services become healthy.",
+        }
+
+    # ── Remap path: generate overlay + drive docker compose directly ────────
+    try:
+        cfg = runner.compose_config_json()
+    except (RuntimeError, ValueError) as e:
+        return {"status": "blocked", "message": f"could not read compose config: {e}"}
+
+    acr_err = runner.acr_probe(cfg)
+    if acr_err:
+        return {"status": "blocked", "message": acr_err, "warnings": env["warnings"]}
+
+    try:
+        overlay_path, mapping = runner.generate_ports_override(offset, runner.port_keep())
+    except ValueError as e:
+        return {"status": "blocked", "message": str(e)}
+
+    # Port pre-flight on the REMAPPED host ports (mirrors run.sh's own preflight).
+    new_ports = sorted({m["new_host"] for m in mapping})
+    busy = runner.ports_in_use(new_ports)
+    if busy:
+        return {
+            "status": "blocked",
+            "message": f"remapped port(s) already in use: {busy}. "
+                       "Free them or adjust GAMMA_PORT_OFFSET / GAMMA_PORT_KEEP.",
+            "port_mapping": mapping,
+        }
+
+    log_path.write_bytes(b"")
+    proc = runner.launch_up_compose_background(["-f", str(overlay_path)], pull, log_path)
     started = _now_iso()
-    state.record_up(proc, log_path, args, started)
+    state.record_up(proc, log_path, ["compose", "up", "-d", f"offset={offset}"], started)
 
     return {
         "status": "starting",
+        "mode": "remap",
+        "port_offset": offset,
         "pid": proc.pid,
         "log_path": str(log_path),
+        "overlay": str(overlay_path),
         "pull": pull,
         "started": started,
+        "port_mapping": mapping,
+        "urls": _url_hints(mapping),
         "warnings": env["warnings"],
         "next": "Poll stack_status to see when services become healthy (cold pulls take several minutes).",
     }
+
+
+def _url_hints(mapping: list[dict]) -> dict:
+    """Human-friendly access URLs given the remapped ports."""
+    by_new = {(m["service"], m["container"]): m["new_host"] for m in mapping}
+    hints = {}
+    nginx = next((m["new_host"] for m in mapping if m["service"] == "nginx"), None)
+    if nginx:
+        hints["UIs (via nginx, Host-routed)"] = {
+            "gamma console": f"http://gamma.localhost:{nginx}",
+            "APIM console": f"http://apim.localhost:{nginx}",
+            "APIM portal": f"http://portal.localhost:{nginx}",
+            "AM webui": f"http://am.localhost:{nginx}",
+            "note": "UIs/OAuth flows registered by stack_setup assume :80; if a "
+                    "redirect misbehaves, run with GAMMA_PORT_KEEP=nginx to keep :80.",
+        }
+    backends = {
+        "AM mgmt API": by_new.get(("management", 8093)),
+        "AM gateway": by_new.get(("gateway", 8092)),
+        "APIM rest-api": by_new.get(("apim-rest-api", 8083)),
+        "APIM gateway": by_new.get(("apim-gateway", 8082)),
+        "SPIRE JWKS": by_new.get(("spire-oidc", 8443)),
+    }
+    hints["backends (direct)"] = {k: f"http://localhost:{v}" for k, v in backends.items() if v}
+    return hints
 
 
 @mcp.tool()
