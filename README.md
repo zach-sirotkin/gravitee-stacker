@@ -69,10 +69,12 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 (admin/admin), portal `:8085`, management API `:8083/management`, gateway `:8082`
 (add `APIM_PORT_OFFSET`, default 20000, in coexist mode).
 
-**License.** Pass `license="/path/to/license.key"` (or set `APIM_LICENSE`) to mount a
-Gravitee license into the gateway + management-api (enterprise features). Resolution
-order: arg → `APIM_LICENSE` → the Gamma stack's `license.key` → OSS mode. The mount is
-applied via an overlay (`apim-license.yml`) only when a real license file is found.
+**License.** To run with enterprise features, drop a Gravitee license at the
+conventional path **`~/.gravitee/license.key`** and `apim_up` mounts it into the
+gateway + management-api automatically. Resolution order: `license="/path/..."` arg →
+`APIM_LICENSE` env → `~/.gravitee/license.key` → OSS mode. The mount is applied via an
+overlay (`apim-license.yml`) only when a real, non-empty license file is found (a
+phantom bind-mount directory is skipped). `apim_up`'s result reports which source was used.
 
 **Conflict flow.** `apim_up` checks its target ports first (canonical, or remapped in
 coexist mode). On a conflict it identifies the exact compose project/containers and

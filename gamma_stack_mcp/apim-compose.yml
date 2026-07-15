@@ -97,7 +97,8 @@ services:
     depends_on:
       - apim-management-api
     environment:
-      - MGMT_API_URL=http://localhost:${APIM_MGMT_PORT:-8083}/management/organizations/DEFAULT/environments/DEFAULT/
+      - MGMT_API_URL=http://localhost:${APIM_MGMT_PORT:-8083}/management/
+      - DEFAULT_PORTAL=http://localhost:${APIM_PORTAL_PORT:-8085}
 
   apim-portal:
     image: graviteeio/apim-portal-ui:${APIM_VERSION:-latest}

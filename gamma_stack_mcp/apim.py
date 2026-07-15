@@ -75,16 +75,22 @@ def _port_env(coexist: bool, offset: int) -> dict:
     return {var: str(base + offset) for var, base in _PORT_VARS.items()}
 
 
+# The conventional place to drop a license so `apim_up` finds it with no arg/env.
+# Override with the `license` arg or APIM_LICENSE env.
+DEFAULT_LICENSE_PATH = Path.home() / ".gravitee" / "license.key"
+
+
 def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
     """Resolve the license file path. Returns (abs_path_or_None, source).
 
-    Order: explicit arg -> APIM_LICENSE env -> the Gamma stack's license.key (a
-    convenience default) -> none (OSS mode).
+    Order: explicit arg -> APIM_LICENSE env -> the conventional
+    ~/.gravitee/license.key -> none (OSS mode). A candidate is used only if it's a
+    real, non-empty file (so a phantom bind-mount directory is skipped).
     """
     candidates = [
         (license_arg, "argument"),
         (os.environ.get("APIM_LICENSE", ""), "APIM_LICENSE env"),
-        (str(runner.stack_dir() / "docker" / "license" / "license.key"), "Gamma stack license"),
+        (str(DEFAULT_LICENSE_PATH), f"default path ({DEFAULT_LICENSE_PATH})"),
     ]
     for raw, source in candidates:
         if not raw:
