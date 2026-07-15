@@ -1,6 +1,9 @@
 # MCP runtime state (tracked up-process metadata + captured logs)
 .run/
 
+# macOS
+.DS_Store
+
 # Python
 .venv/
 venv/
