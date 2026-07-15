@@ -284,6 +284,17 @@ def generate_ports_override(offset: int, keep: set[str]) -> tuple[Path, list[dic
     return path, mapping
 
 
+def published_host_ports(cfg: Optional[dict] = None) -> list[int]:
+    """The stack's original published host ports (for the default-mode preflight)."""
+    cfg = cfg if cfg is not None else compose_config_json()
+    ports: set[int] = set()
+    for s in cfg.get("services", {}).values():
+        for pt in (s.get("ports") or []):
+            if pt.get("published"):
+                ports.add(int(pt["published"]))
+    return sorted(ports)
+
+
 def acr_probe(cfg: dict) -> Optional[str]:
     """Mirror run.sh's registry-auth check: probe a real ACR image manifest.
 
@@ -393,17 +404,22 @@ def launch_background(run_sh_args: list[str], log_path: Path) -> subprocess.Pope
     return proc
 
 
-def run_foreground(run_sh_args: list[str], timeout: int) -> dict:
+def run_foreground(run_sh_args: list[str], timeout: int,
+                   extra_env: Optional[dict[str, str]] = None) -> dict:
     """Run `bash run.sh <args>` to completion, capturing output.
 
-    For the shorter-lived subcommands (setup / down). Returns a structured result;
-    a timeout is reported, not raised.
+    For the shorter-lived subcommands (setup / down). `extra_env` overlays onto the
+    child environment (e.g. remapped AM_URL/APIM_URL for coexist-mode setup).
+    Returns a structured result; a timeout is reported, not raised.
     """
+    env = _child_env()
+    if extra_env:
+        env.update(extra_env)
     try:
         p = subprocess.run(
             ["bash", str(run_sh()), *run_sh_args],
             cwd=str(docker_dir()),
-            env=_child_env(),
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -418,6 +434,39 @@ def run_foreground(run_sh_args: list[str], timeout: int) -> dict:
         return {
             "timed_out": True,
             "returncode": None,
+            "stdout": e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
+            "stderr": e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or ""),
+            "timeout": timeout,
+        }
+
+
+def run_setup_script_direct(timeout: int, extra_env: dict[str, str]) -> dict:
+    """Run `bash setup.sh` directly (coexist mode), bypassing run.sh's setup wrapper.
+
+    run.sh's `setup` subcommand health-gates on HARDCODED canonical URLs
+    (localhost:8093/8083/18443) before exec'ing setup.sh — those ports aren't bound
+    when the stack runs on remapped ports, so the wrapper would hang. setup.sh itself
+    does not health-gate (it assumes AM+APIM are already up) and routes every call
+    through $AM_URL/$APIM_URL, so we invoke it directly with the remapped env. Call
+    only after stack_status reports healthy.
+    """
+    env = _child_env()
+    env.update(extra_env)
+    setup_sh = docker_dir() / "setup.sh"
+    try:
+        p = subprocess.run(
+            ["bash", str(setup_sh)],
+            cwd=str(docker_dir()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return {"timed_out": False, "returncode": p.returncode,
+                "stdout": p.stdout, "stderr": p.stderr}
+    except subprocess.TimeoutExpired as e:
+        return {
+            "timed_out": True, "returncode": None,
             "stdout": e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
             "stderr": e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or ""),
             "timeout": timeout,

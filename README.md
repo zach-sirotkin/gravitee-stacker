@@ -52,22 +52,33 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 | `GAMMA_STACK_DIR`| `/Users/zachary.sirotkin/Documents/gravitee-gamma-modules-sdk` | Stack repo root. All calls run in `$GAMMA_STACK_DIR/docker`. |
 | `ESM_MESH`       | unset                                                      | If set, adds the ESM Kafka-mesh overlay (matches `run.sh`). |
 | `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
-| `GAMMA_PORT_OFFSET` | `20000`                                                | Host-port shift applied on `stack_up` (see **Ports** below). `0` disables remap. |
-| `GAMMA_PORT_KEEP`   | unset                                                  | Comma-separated services to leave on their original host ports (e.g. `nginx`). |
-| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` + generated overlay are kept. |
+| `GAMMA_PORT_OFFSET` | `20000`                                                | Host-port shift used in **coexist** mode (see **Ports** below). |
+| `GAMMA_PORT_KEEP`   | unset                                                  | Comma-separated services to leave on their original host ports in coexist mode (e.g. `nginx`). |
+| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` + generated overlay + last-mode are kept. |
 
-### Ports — never collide with your other stacks
+### Ports — two modes
 
-The Gamma stack's published host ports are **hardcoded** in the stack repo's
-compose files (`'8082:8082'`, `'8083:8083'`, `'80:80'`, …) and `run.sh` takes no
-overlay, so they can't be remapped as a pure wrapper. Instead, `stack_up` **shifts
-every published host port by `GAMMA_PORT_OFFSET` (default 20000)** using a generated
-compose overlay (`.run/ports.override.yml`, built from `docker compose config` so it
-tracks whatever the stack actually publishes) applied with the `!override` tag. In
-this mode the up path drives `docker compose` directly (pull + `up -d`, still
-non-blocking); `setup`/`down`/`logs`/`status` are unaffected.
+The Gamma stack's published host ports are **hardcoded** in the stack repo's compose
+files (`'8082:8082'`, `'8083:8083'`, `'80:80'`, …) and `run.sh` takes no overlay, so
+they can't be remapped as a pure wrapper. `stack_up` therefore offers two modes:
 
-Default mapping (offset 20000):
+**Default — canonical ports (`stack_up`)**
+Brings the stack up on its real ports via `run.sh` — the **fully-wired demo**
+(`stack_setup`, OAuth, edge config all correct). Before launching it pre-checks the
+canonical ports; if one is already taken (e.g. `apim-latest` on 8082/8083) it does
+**not** start, and returns `status: "port_conflict"` **suggesting coexist mode**:
+
+```json
+{ "status": "port_conflict", "busy_ports": [8082, 8083],
+  "suggest": { "tool": "stack_up", "args": { "coexist": true } } }
+```
+
+**Coexist — remapped ports (`stack_up` with `coexist=true`)**
+Shifts every published host port by `GAMMA_PORT_OFFSET` (default 20000) via a
+generated compose overlay (`.run/ports.override.yml`, built from `docker compose
+config` so it tracks whatever the stack actually publishes) applied with the
+`!override` tag, and drives `docker compose up` directly (still non-blocking). Lets
+Gamma run **alongside** your other stacks.
 
 | Service        | Original | Remapped | | Service       | Original | Remapped |
 | -------------- | -------- | -------- |-| ------------- | -------- | -------- |
@@ -76,17 +87,25 @@ Default mapping (offset 20000):
 | apim-rest-api  | 8083     | 28083    | | apim-es       | 9200     | 29200    |
 | apim-mongo     | 27017    | 47017    | | AM mongo      | 27018    | 47018    |
 
-…and the 18xxx debug/reactor/SPIRE ports shift into the 38xxx band. None of these
-collide with `apim-latest` (8082–8085) or `gravitee-am-local` (8086).
+…and the 18xxx debug/reactor/SPIRE ports shift into the 38xxx band. None collide
+with `apim-latest` (8082–8085) or `gravitee-am-local` (8086). UIs move with nginx:
+`http://gamma.localhost:20080`, `apim.localhost:20080`, etc.
 
-- **UIs move with nginx:** `http://gamma.localhost:20080`, `apim.localhost:20080`, etc.
-- **Caveat:** OAuth/redirect URIs registered by `stack_setup` assume nginx on `:80`.
-  If a login flow misbehaves on the remapped port, run with `GAMMA_PORT_KEEP=nginx`
-  to keep nginx on `:80` (it doesn't conflict with the attached stacks anyway).
-- **Edge Daemon:** if you remap and then install the daemon, point it at the new
-  reactor port via `EDGE_REACTOR_PORT` (default reactor is 18072 → remapped 38072).
-- **Disable entirely:** `GAMMA_PORT_OFFSET=0` → `stack_up` uses the plain `run.sh`
-  path with original ports.
+**Coexist caveats (why canonical is the default):** `setup.sh` bakes canonical ports
+into a few places. `stack_setup` handles what it can and is transparent about the rest:
+
+- It runs `setup.sh` **directly** with `AM_URL`/`APIM_URL`/`EDGE_REACTOR_PORT` pointed
+  at the remapped ports (it can't use `run.sh setup`, whose health-gate targets
+  hardcoded canonical ports and would hang). Run it only after `stack_status` is healthy.
+- Still canonical (hardcoded literals it can't fix without editing the stack repo):
+  the saved edge `gatewayUrl: http://localhost:8082` and the `:80` OAuth redirect URIs.
+  So edge/OAuth wiring is **best-effort** in coexist mode.
+- `GAMMA_PORT_KEEP=nginx` keeps the UIs on `:80` (clean URLs; accepts `:80` collision risk).
+- **Edge Daemon:** installed with `EDGE_REACTOR_PORT` pointed at the remapped reactor
+  (18072 → 38072).
+
+For a fully-wired demo, use canonical mode (stop the conflicting stack, or free
+8082/8083). Use coexist to run Gamma next to other stacks.
 
 Runtime state (the tracked up-process metadata + `up.log`) lives in **this
 project's** `.run/` directory (gitignored here) — deliberately kept out of the
@@ -171,10 +190,11 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 ## Typical flow
 
 ```
-stack_up                     → { status: "starting", pid, log_path }
-stack_status  (repeat)       → overall: starting → … → healthy
-stack_setup                  → bootstraps the demo (after healthy)
-stack_logs("apim-rest-api")  → tail a service
-stack_install_daemon         → returns the sudo command to run in your own terminal
-stack_down                   → tears the stack down
+stack_up                       → { status: "starting", pid, log_path }        (canonical ports)
+   └─ if status: "port_conflict" → stack_up(coexist=true)                      (remapped ports)
+stack_status   (repeat)        → overall: starting → … → healthy
+stack_setup                    → bootstraps the demo (after healthy; auto-matches the up mode)
+stack_logs("apim-rest-api")    → tail a service
+stack_install_daemon           → returns the sudo command to run in your own terminal
+stack_down                     → tears the stack down
 ```

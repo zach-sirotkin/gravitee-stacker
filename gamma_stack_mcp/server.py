@@ -142,22 +142,29 @@ def _overall_hint(overall: str) -> str:
 
 # ── tools ─────────────────────────────────────────────────────────────────────
 @mcp.tool()
-def stack_up(pull: bool = True) -> dict:
+def stack_up(pull: bool = True, coexist: bool = False) -> dict:
     """Start the Gamma demo stack in the background (non-blocking).
 
     Launches the up in a detached subprocess, redirecting output to .run/up.log,
     and returns immediately — it never waits, so cold image pulls won't time out
     your MCP client. Poll `stack_status` to learn when the stack is actually ready.
 
-    Ports: by default every published host port is shifted by GAMMA_PORT_OFFSET
-    (default 20000) via a generated compose overlay, so the stack never collides
-    with other local stacks. The remap path drives `docker compose` directly (the
-    stack's ports are hardcoded and run.sh takes no overlay). Set GAMMA_PORT_OFFSET=0
-    to disable remapping and use the plain `run.sh` path instead. GAMMA_PORT_KEEP
-    (comma-separated services) leaves those on their original ports.
+    Two port modes:
+      * default (coexist=False): the stack's canonical ports via `run.sh` — the
+        fully-wired demo (stack_setup, OAuth, edge config all correct). If a
+        canonical port is already taken (e.g. another local stack), this does NOT
+        launch; it returns status "port_conflict" and suggests coexist mode.
+      * coexist=True: every published host port is shifted by GAMMA_PORT_OFFSET
+        (default 20000) via a generated compose overlay, so the stack runs
+        alongside others. Drives `docker compose` directly (the stack's ports are
+        hardcoded and run.sh takes no overlay). Caveat: stack_setup hardcodes a few
+        canonical ports (edge gatewayUrl :8082, :80 OAuth redirect URIs) that can't
+        be fully remapped, so the demo bootstrap is best-effort in this mode.
+        GAMMA_PORT_KEEP (comma-separated services) leaves those on original ports.
 
     Args:
         pull: Pull images first (default). False uses whatever images are cached.
+        coexist: Run on remapped ports so the stack won't collide with others.
 
     Only one up at a time: if a tracked up-process is still running this refuses
     and points you at stack_status.
@@ -180,24 +187,42 @@ def stack_up(pull: bool = True) -> dict:
             "warnings": env["warnings"],
         }
 
-    offset = runner.port_offset()
     log_path = runner.up_log_path()
 
-    # ── Plain run.sh path (remap disabled) ──────────────────────────────────
-    if offset == 0:
+    # ── Default: canonical ports via run.sh (with a conflict preflight) ─────
+    if not coexist:
+        try:
+            busy = runner.ports_in_use(runner.published_host_ports())
+        except (RuntimeError, ValueError):
+            busy = []  # couldn't read config; let run.sh's own preflight handle it
+        if busy:
+            return {
+                "status": "port_conflict",
+                "message": (
+                    f"canonical port(s) already in use: {busy} — likely another local "
+                    "stack (e.g. apim-latest on 8082/8083). The stack was NOT started. "
+                    "Re-run stack_up with coexist=true to bring it up on remapped "
+                    f"ports (shifted by {runner.port_offset()}), or free these ports."
+                ),
+                "busy_ports": busy,
+                "suggest": {"tool": "stack_up", "args": {"coexist": True}},
+            }
         args = [] if pull else ["--no-pull"]
         log_path.write_bytes(b"")
         proc = runner.launch_background(args, log_path)
         started = _now_iso()
         state.record_up(proc, log_path, args, started)
+        state.record_mode(coexist=False, offset=0, keep=[])
         return {
-            "status": "starting", "mode": "run.sh", "pid": proc.pid,
+            "status": "starting", "mode": "canonical", "pid": proc.pid,
             "log_path": str(log_path), "pull": pull, "started": started,
             "warnings": env["warnings"],
             "next": "Poll stack_status to see when services become healthy.",
         }
 
-    # ── Remap path: generate overlay + drive docker compose directly ────────
+    # ── Coexist: generate overlay + drive docker compose directly ───────────
+    offset = runner.port_offset() or runner.DEFAULT_PORT_OFFSET
+    keep = runner.port_keep()
     try:
         cfg = runner.compose_config_json()
     except (RuntimeError, ValueError) as e:
@@ -208,7 +233,7 @@ def stack_up(pull: bool = True) -> dict:
         return {"status": "blocked", "message": acr_err, "warnings": env["warnings"]}
 
     try:
-        overlay_path, mapping = runner.generate_ports_override(offset, runner.port_keep())
+        overlay_path, mapping = runner.generate_ports_override(offset, keep)
     except ValueError as e:
         return {"status": "blocked", "message": str(e)}
 
@@ -227,10 +252,11 @@ def stack_up(pull: bool = True) -> dict:
     proc = runner.launch_up_compose_background(["-f", str(overlay_path)], pull, log_path)
     started = _now_iso()
     state.record_up(proc, log_path, ["compose", "up", "-d", f"offset={offset}"], started)
+    state.record_mode(coexist=True, offset=offset, keep=sorted(keep))
 
     return {
         "status": "starting",
-        "mode": "remap",
+        "mode": "coexist",
         "port_offset": offset,
         "pid": proc.pid,
         "log_path": str(log_path),
@@ -239,6 +265,11 @@ def stack_up(pull: bool = True) -> dict:
         "started": started,
         "port_mapping": mapping,
         "urls": _url_hints(mapping),
+        "caveats": [
+            "stack_setup will remap AM_URL/APIM_URL/EDGE_REACTOR_PORT, but its "
+            "hardcoded edge gatewayUrl (:8082) and :80 OAuth redirect URIs stay "
+            "canonical — edge/OAuth wiring is best-effort in coexist mode.",
+        ],
         "warnings": env["warnings"],
         "next": "Poll stack_status to see when services become healthy (cold pulls take several minutes).",
     }
@@ -287,8 +318,26 @@ def stack_status() -> dict:
     return _summarize()
 
 
+def _coexist_setup_env(offset: int, keep: list[str]) -> dict:
+    """Point setup.sh at the remapped host ports it CAN be told about.
+
+    setup.sh parameterizes AM_URL / APIM_URL / EDGE_REACTOR_PORT (canonical 8093 /
+    8083 / 18072). A service in `keep` stays on its canonical port.
+    """
+    keep_set = set(keep)
+
+    def host(port: int, service: str) -> int:
+        return port if service in keep_set else port + offset
+
+    return {
+        "AM_URL": f"http://localhost:{host(8093, 'management')}",
+        "APIM_URL": f"http://localhost:{host(8083, 'apim-rest-api')}",
+        "EDGE_REACTOR_PORT": str(host(18072, 'apim-gateway')),
+    }
+
+
 @mcp.tool()
-def stack_setup(timeout_seconds: int = 300) -> dict:
+def stack_setup(timeout_seconds: int = 300, coexist: "bool | None" = None) -> dict:
     """Bootstrap the demo environment (`run.sh setup`), run in the foreground.
 
     Waits for AM + APIM + SPIRE to answer, then runs setup.sh. Assumes the stack
@@ -297,11 +346,38 @@ def stack_setup(timeout_seconds: int = 300) -> dict:
     Args:
         timeout_seconds: Max wait (default 300 = 5 min). setup can take a minute+;
             if it times out, run it yourself: `cd $GAMMA_STACK_DIR/docker && bash run.sh setup`.
+        coexist: Whether the stack is on remapped ports. Default (None) auto-detects
+            from the last stack_up. When true, AM_URL/APIM_URL/EDGE_REACTOR_PORT are
+            pointed at the remapped ports — but setup.sh's hardcoded edge gatewayUrl
+            (:8082) and :80 OAuth redirect URIs stay canonical (a documented gap).
     """
-    result = runner.run_foreground(["setup"], timeout=timeout_seconds)
+    mode = state.read_mode()
+    active = mode.get("coexist", False) if coexist is None else coexist
+
+    caveats = []
+    if active:
+        # Coexist: run setup.sh DIRECTLY with remapped AM_URL/APIM_URL. We can't use
+        # `run.sh setup` here — its wait_healthy gate targets hardcoded canonical
+        # ports (8093/8083/18443) that aren't bound in coexist mode, so it would hang.
+        offset = mode.get("offset") or runner.DEFAULT_PORT_OFFSET
+        keep = mode.get("keep", [])
+        extra_env = _coexist_setup_env(offset, keep)
+        caveats = [
+            f"coexist mode: ran setup.sh directly, pointed at remapped ports {extra_env} "
+            "(run.sh's setup health-gate targets canonical ports and would hang here).",
+            "setup.sh's hardcoded edge gatewayUrl (http://localhost:8082) and :80 "
+            "OAuth redirect URIs are NOT remapped — edge/OAuth wiring is best-effort. "
+            "For a fully-wired demo use canonical ports (stack_up without coexist).",
+            "Run this only after stack_status reports healthy (no health-gate here).",
+        ]
+        result = runner.run_setup_script_direct(timeout_seconds, extra_env)
+    else:
+        result = runner.run_foreground(["setup"], timeout=timeout_seconds)
     if result["timed_out"]:
         return {
             "status": "timeout",
+            "coexist": active,
+            "caveats": caveats,
             "message": f"setup exceeded {timeout_seconds}s and was left running/killed by the timeout. "
                        "Re-run in your terminal if needed: "
                        "cd $GAMMA_STACK_DIR/docker && bash run.sh setup",
@@ -310,6 +386,8 @@ def stack_setup(timeout_seconds: int = 300) -> dict:
         }
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
+        "coexist": active,
+        "caveats": caveats,
         "returncode": result["returncode"],
         "stdout": result["stdout"],
         "stderr": result["stderr"],
