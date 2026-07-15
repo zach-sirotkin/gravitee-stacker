@@ -1,39 +1,57 @@
 # gamma-stack-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that manages the **Gravitee Gamma
-demo stack**. It is a thin wrapper over the stack's `docker/run.sh` — it invokes
-`run.sh` / `docker compose` and surfaces status; it does **not** reimplement any
-orchestration.
+An [MCP](https://modelcontextprotocol.io) server that manages two Gravitee Docker
+stacks from your AI assistant (Claude Code, Cursor, Claude Desktop):
 
-It lives as a **sibling** of the stack repo and has its own (optional) git history —
-nothing here touches the `gravitee-gamma-modules-sdk` repo's working tree.
+- **Standalone APIM** (`apim_*`) — a self-contained, ready-to-run API Management
+  stack. **Needs only Docker.** Pulls any release you pick and stands it up.
+- **Gamma demo** (`stack_*`) — a thin wrapper over the Gamma SDK's `docker/run.sh`.
+  Needs the SDK repo + registry access (below).
 
+## Quickstart
+
+**Requirements:** Docker Desktop (running), Python 3.10+, macOS or Linux.
+
+**1. Install**
+```bash
+git clone <this-repo-url> gamma-stack-mcp
+cd gamma-stack-mcp
+python3 -m venv .venv && ./.venv/bin/python -m pip install -e .
 ```
-Documents/
-  gravitee-gamma-modules-sdk/   ← the stack (run.sh, compose files) — left untouched
-  gamma-stack-mcp/              ← this MCP server
+
+**2. Register it** with your client — Claude Code:
+```bash
+claude mcp add gamma-stack -- /ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python -m gamma_stack_mcp.server
 ```
+…or add the JSON block under [Wire it into a client](#wire-it-into-a-client) (Cursor / Claude Desktop use the same block). Use an **absolute** path — clients don't expand `~`.
 
-## What you need to run it
+**3. Check readiness** — ask your assistant to run the `doctor` tool. It reports
+what's ready and what's missing for each stack.
 
-This project is only the **wrapper**. Each user assembles it with things that live
-outside this repo:
+**4. Run APIM** — that's all it takes for the APIM stack:
+> "Stand up the latest APIM." → `apim_up()` → poll `apim_status` → console at http://localhost:8084 (admin/admin).
 
-- **The stack repo** — a local checkout of `gravitee-gamma-modules-sdk` (this tool
-  drives its `docker/run.sh`). Point `GAMMA_STACK_DIR` at it.
-- **Docker Desktop** running.
-- **Registry access** — `az acr login --name graviteeio`, or set `REGISTRY=graviteeio`
-  in `docker/.env` for the public hub — plus a **license** at `docker/license/license.key`.
-- **macOS or Linux**, **Python 3.10+**. (The port pre-flight uses `lsof` and process
-  detach uses POSIX APIs — not Windows. The `*_daemon` tools are macOS-specific.)
+### Where to put things
 
-Nothing secret is committed: `.venv/` and `.run/` (per-stack state + logs) are gitignored.
+| Thing | Where | Needed for |
+| ----- | ----- | ---------- |
+| **Gravitee license** (optional) | `~/.gravitee/license.key` — `mkdir -p ~/.gravitee && cp <your-license>.key ~/.gravitee/license.key` | Enterprise features on APIM. Without it APIM runs in **OSS mode**. Auto-detected; no config needed. |
+| **Gamma SDK repo** | Clone `gravitee-gamma-modules-sdk`, then set `GAMMA_STACK_DIR` to its path (default `~/gravitee-gamma-modules-sdk`) | The **Gamma** stack only (`stack_*`). APIM doesn't need it. |
+| **Registry login** | `az acr login --name graviteeio` (or `REGISTRY=graviteeio` for the public hub) | The **Gamma** stack only — its images are on Gravitee's private registry. |
+
+> APIM images are public (`graviteeio/apim-*`) — no login needed. A license is optional.
+> So if you only want APIM, step 4 is the whole setup.
+
+Nothing secret is committed: `.venv/` and `.run/` (per-stack state + logs) are gitignored,
+and this project never touches the Gamma SDK repo's working tree.
 
 ## What it exposes
 
 It manages **two independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
 a wrapper over the stack repo's `run.sh`) and a self-contained standalone **APIM**
-stack (`apim_*`, shipped with the tool).
+stack (`apim_*`, shipped with the tool). Plus **`doctor`** — a one-call readiness
+check (Docker, license, Gamma SDK) that tells you what's set up and what's missing.
+Run it first.
 
 ### Gamma stack (`stack_*`)
 

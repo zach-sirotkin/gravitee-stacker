@@ -569,6 +569,49 @@ def apim_latest_version() -> dict:
             "repo": "https://github.com/gravitee-io/gravitee-api-management"}
 
 
+@mcp.tool()
+def doctor() -> dict:
+    """Check environment readiness for both stacks and report what's missing.
+
+    Call this first when setting up. The APIM stack needs only Docker (public
+    images; a license is optional). The Gamma stack additionally needs the stack
+    repo (GAMMA_STACK_DIR), ACR login, and a license.
+    """
+    docker_err = runner.docker_running_error()
+    docker_ok = docker_err is None
+
+    lic_path, lic_src = apim.resolve_license("")
+    apim_next = []
+    if not docker_ok:
+        apim_next.append(f"Start Docker: {docker_err}")
+    if not lic_path:
+        apim_next.append(f"(optional) drop a Gravitee license at {apim.DEFAULT_LICENSE_PATH} "
+                         "for enterprise features — OSS works without it.")
+
+    gamma_env = runner.check_environment()
+    gamma_next = list(gamma_env["problems"]) + list(gamma_env["warnings"])
+
+    return {
+        "docker": {"ok": docker_ok, "detail": docker_err or "running"},
+        "apim_stack": {
+            "ready": docker_ok,
+            "needs": "Docker only (public images).",
+            "license": {"found": bool(lic_path),
+                        "path": lic_path or str(apim.DEFAULT_LICENSE_PATH),
+                        "source": lic_src},
+            "latest_version": apim.resolve_version("latest")[0],
+            "next_steps": apim_next or ["ready — call apim_up()"],
+        },
+        "gamma_stack": {
+            "ready": gamma_env["ok"],
+            "stack_dir": str(runner.stack_dir()),
+            "stack_dir_found": runner.docker_dir().is_dir(),
+            "needs": "the stack repo at GAMMA_STACK_DIR + ACR login + a license.",
+            "next_steps": gamma_next or ["ready — call stack_up()"],
+        },
+    }
+
+
 def main() -> None:
     """Console-script entry point: run the server over stdio."""
     mcp.run()
