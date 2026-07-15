@@ -29,3 +29,4 @@ packages = ["gamma_stack_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "gamma_stack_mcp/apim-compose.yml" = "gamma_stack_mcp/apim-compose.yml"
+"gamma_stack_mcp/apim-license.yml" = "gamma_stack_mcp/apim-license.yml"

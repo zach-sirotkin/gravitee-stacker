@@ -27,8 +27,7 @@ outside this repo:
 - **macOS or Linux**, **Python 3.10+**. (The port pre-flight uses `lsof` and process
   detach uses POSIX APIs — not Windows. The `*_daemon` tools are macOS-specific.)
 
-Nothing secret is committed: `.venv/` and `.run/` (state + logs + generated overlay)
-are gitignored.
+Nothing secret is committed: `.venv/` and `.run/` (per-stack state + logs) are gitignored.
 
 ## What it exposes
 
@@ -45,7 +44,7 @@ stack (`apim_*`, shipped with the tool).
 | `stack_setup`            | Runs `run.sh setup` in the foreground (configurable timeout, default 5 min).                  |
 | `stack_down`             | Runs `run.sh down` (`docker compose down`).                                                   |
 | `stack_logs`             | `docker compose logs --tail=<lines> <service>` for one validated service.                     |
-| `stack_ports`            | Shows the active host-port mapping + access URLs (reflects the last up's mode; can preview either). |
+| `stack_ports`            | Shows the Gamma stack's canonical host ports + access URLs.                                   |
 | `stack_install_daemon`   | **Returns the command to run yourself** — does not execute (it self-elevates via sudo).      |
 | `stack_uninstall_daemon` | Same treatment as install.                                                                    |
 
@@ -57,24 +56,30 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 
 | Tool                 | What it does                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------- |
-| `apim_up`            | Resolves + pins a release, checks ports, and starts APIM in the background. **On a port conflict it does not start** — returns `port_conflict` naming the offending project(s); pass `down_conflicting=true` to down them first (data preserved). `version="latest"` (default) or a pin like `"4.12.7"`; `recreate=true` to reload/recreate. |
-| `apim_status`        | Overall verdict + per-service health for the `gravitee-apim` project, plus the pinned version and URLs. |
+| `apim_up`            | Resolves + pins a release, checks ports, and starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `coexist=true` (remapped ports, run alongside another stack), `down_conflicting=true` (down the other stack first), `recreate=true` (reload), `license="/path/to/license.key"`. |
+| `apim_status`        | Overall verdict + per-service health for the `gravitee-apim` project, plus the pinned version, mode, and URLs. |
 | `apim_down`          | `docker compose down` (volumes preserved).                                                          |
 | `apim_logs`          | Tail one APIM service.                                                                              |
 | `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
 
-**Ports & versions.** `version="latest"` resolves the newest stable tag from
+**Versions.** `version="latest"` resolves the newest stable tag from
 `gravitee-io/gravitee-api-management` (e.g. `4.12.8`) → sets `APIM_VERSION` → pulls
-`graviteeio/apim-*:<version>`. Pin a specific tag with `version="4.12.7"`; reload with
+`graviteeio/apim-*:<version>`. Pin a tag with `version="4.12.7"`; reload/recreate with
 `recreate=true`. UIs are direct (no host-routing): console `http://localhost:8084`
-(admin/admin), portal `http://localhost:8085`, management API `http://localhost:8083/management`,
-gateway `http://localhost:8082`.
+(admin/admin), portal `:8085`, management API `:8083/management`, gateway `:8082`
+(add `APIM_PORT_OFFSET`, default 20000, in coexist mode).
 
-**Conflict flow.** Because APIM's ports (8082/8083) overlap the Gamma stack, `apim_up`
-checks first and, if a conflict is found, identifies the exact compose project/containers
-and returns `port_conflict` + a `suggest` payload. It **never auto-downs** — you opt in
-with `down_conflicting=true`, which brings the conflicting project(s) down (no `-v`, so
-their data volumes survive) and, if it was the tool-managed Gamma stack, resets its tracking.
+**License.** Pass `license="/path/to/license.key"` (or set `APIM_LICENSE`) to mount a
+Gravitee license into the gateway + management-api (enterprise features). Resolution
+order: arg → `APIM_LICENSE` → the Gamma stack's `license.key` → OSS mode. The mount is
+applied via an overlay (`apim-license.yml`) only when a real license file is found.
+
+**Conflict flow.** `apim_up` checks its target ports first (canonical, or remapped in
+coexist mode). On a conflict it identifies the exact compose project/containers and
+returns `port_conflict` + a `suggest` payload — it **never auto-downs**. In canonical
+mode `suggest` offers both `run_alongside` (`coexist=true`) and `down_the_other`
+(`down_conflicting=true`); the latter brings the conflicting project(s) down (no `-v`,
+data preserved) and resets Gamma's tracking if it was the tool-managed stack.
 
 ### The background-process design (the important part)
 
@@ -99,68 +104,32 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 
 | Env var          | Default                                                     | Meaning                                    |
 | ---------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| `GAMMA_STACK_DIR`| `~/gravitee-gamma-modules-sdk` (override this) | Path to your checkout of the stack repo. All calls run in `$GAMMA_STACK_DIR/docker`. |
+| `GAMMA_STACK_DIR`| `~/gravitee-gamma-modules-sdk` (override this) | Path to your checkout of the stack repo. All Gamma calls run in `$GAMMA_STACK_DIR/docker`. |
 | `ESM_MESH`       | unset                                                      | If set, adds the ESM Kafka-mesh overlay (matches `run.sh`). |
 | `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
-| `GAMMA_PORT_OFFSET` | `20000`                                                | Host-port shift used in **coexist** mode (see **Ports** below). |
-| `GAMMA_PORT_KEEP`   | unset                                                  | Comma-separated services to leave on their original host ports in coexist mode (e.g. `nginx`). |
-| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` + generated overlay + last-mode are kept. |
+| `APIM_PORT_OFFSET` | `20000`                                                 | Host-port shift for `apim_up(coexist=true)`. |
+| `APIM_LICENSE`   | unset                                                      | Default license path for the APIM stack (overridden by `apim_up`'s `license` arg). |
+| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` live (per stack). |
 
-### Ports — two modes
+### Ports — who owns which mode
 
-The Gamma stack's published host ports are **hardcoded** in the stack repo's compose
-files (`'8082:8082'`, `'8083:8083'`, `'80:80'`, …) and `run.sh` takes no overlay, so
-they can't be remapped as a pure wrapper. `stack_up` therefore offers two modes:
+- **Gamma runs on canonical ports only.** Its consoles hardcode host-routing and
+  `:80` (the bootstrap `baseURL` has no port), so remapping breaks the UIs — Gamma is
+  strict by design. `stack_up` pre-checks its ports and, if one is taken, returns
+  `port_conflict` (`busy_ports`) without starting. Free them (or down the other stack)
+  and retry. UIs: `http://gamma.localhost`, `apim.localhost`, `portal.localhost`,
+  `am.localhost` (all via nginx on `:80`).
+- **APIM supports coexist** (`apim_up(coexist=true)`), because it uses direct
+  `localhost` ports and the compose parameterizes both the ports *and* the
+  console/portal API URLs — so a remap stays self-consistent. Ports shift by
+  `APIM_PORT_OFFSET` (default 20000): gateway `28082`, mgmt-api `28083`, console
+  `28084`, portal `28085`. This lets APIM run **alongside** Gamma (or any stack on
+  8082/8083) with fully-working consoles.
 
-**Default — canonical ports (`stack_up`)**
-Brings the stack up on its real ports via `run.sh` — the **fully-wired demo**
-(`stack_setup`, OAuth, edge config all correct). Before launching it pre-checks the
-canonical ports; if one is already taken (e.g. `apim-latest` on 8082/8083) it does
-**not** start, and returns `status: "port_conflict"` **suggesting coexist mode**:
-
-```json
-{ "status": "port_conflict", "busy_ports": [8082, 8083],
-  "suggest": { "tool": "stack_up", "args": { "coexist": true } } }
-```
-
-**Coexist — remapped ports (`stack_up` with `coexist=true`)**
-Shifts every published host port by `GAMMA_PORT_OFFSET` (default 20000) via a
-generated compose overlay (`.run/ports.override.yml`, built from `docker compose
-config` so it tracks whatever the stack actually publishes) applied with the
-`!override` tag, and drives `docker compose up` directly (still non-blocking). Lets
-Gamma run **alongside** your other stacks.
-
-| Service        | Original | Remapped | | Service       | Original | Remapped |
-| -------------- | -------- | -------- |-| ------------- | -------- | -------- |
-| nginx (UIs)    | 80       | 20080    | | gateway (AM)  | 8092     | 28092    |
-| apim-gateway   | 8082     | 28082    | | management(AM)| 8093     | 28093    |
-| apim-rest-api  | 8083     | 28083    | | apim-es       | 9200     | 29200    |
-| apim-mongo     | 27017    | 47017    | | AM mongo      | 27018    | 47018    |
-
-…and the 18xxx debug/reactor/SPIRE ports shift into the 38xxx band. None collide
-with `apim-latest` (8082–8085) or `gravitee-am-local` (8086). UIs move with nginx:
-`http://gamma.localhost:20080`, `apim.localhost:20080`, etc.
-
-**Coexist caveats (why canonical is the default):** `setup.sh` bakes canonical ports
-into a few places. `stack_setup` handles what it can and is transparent about the rest:
-
-- It runs `setup.sh` **directly** with `AM_URL`/`APIM_URL`/`EDGE_REACTOR_PORT` pointed
-  at the remapped ports (it can't use `run.sh setup`, whose health-gate targets
-  hardcoded canonical ports and would hang). Run it only after `stack_status` is healthy.
-- Still canonical (hardcoded literals it can't fix without editing the stack repo):
-  the saved edge `gatewayUrl: http://localhost:8082` and the `:80` OAuth redirect URIs.
-  So edge/OAuth wiring is **best-effort** in coexist mode.
-- `GAMMA_PORT_KEEP=nginx` keeps the UIs on `:80` (clean URLs; accepts `:80` collision risk).
-- **Edge Daemon:** installed with `EDGE_REACTOR_PORT` pointed at the remapped reactor
-  (18072 → 38072).
-
-For a fully-wired demo, use canonical mode (stop the conflicting stack, or free
-8082/8083). Use coexist to run Gamma next to other stacks.
-
-Runtime state (the tracked up-process metadata + `up.log`) lives in **this
-project's** `.run/` directory (gitignored here) — deliberately kept out of the
-stack repo so it never shows up as untracked noise there. `run.sh` itself still
-runs with `cwd = $GAMMA_STACK_DIR/docker`.
+Runtime state (tracked up-process metadata + `up.log`, per stack) lives in **this
+project's** `.run/` directory (gitignored here) — kept out of the stack repo so it
+never shows up as untracked noise. `run.sh` itself still runs with
+`cwd = $GAMMA_STACK_DIR/docker`.
 
 ### Prerequisites (surfaced by `stack_up`'s pre-flight)
 
@@ -245,12 +214,21 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 
 ## Typical flow
 
+Gamma demo stack:
 ```
-stack_up                       → { status: "starting", pid, log_path }        (canonical ports)
-   └─ if status: "port_conflict" → stack_up(coexist=true)                      (remapped ports)
+stack_up                       → { status: "starting", pid, log_path }   (canonical ports)
 stack_status   (repeat)        → overall: starting → … → healthy
-stack_setup                    → bootstraps the demo (after healthy; auto-matches the up mode)
+stack_setup                    → bootstraps the demo (after healthy)
 stack_logs("apim-rest-api")    → tail a service
-stack_install_daemon           → returns the sudo command to run in your own terminal
 stack_down                     → tears the stack down
+```
+
+Standalone APIM stack (can run alongside Gamma):
+```
+apim_up(version="latest")               → starting; on port_conflict, either:
+   ├─ apim_up(coexist=true)             → run alongside on 28082-28085
+   └─ apim_up(down_conflicting=true)    → down the other stack first
+apim_status  (repeat)                   → overall: healthy  (console http://localhost:8084)
+apim_up(version="4.12.7", recreate=true)→ pin a different release + recreate
+apim_down                               → tears the APIM stack down
 ```

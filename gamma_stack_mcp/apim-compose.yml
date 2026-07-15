@@ -1,7 +1,10 @@
 # Self-contained standalone Gravitee APIM stack (OSS images), managed by gamma-stack-mcp.
 # Image version is injected via APIM_VERSION (resolved by the tool, e.g. 4.12.8).
-# Named volumes persist across `down` (wiped only by `down -v`). Explicit project
-# name so the tool can identify + tear this stack down by name.
+# Host ports are parameterized so the tool can run this in "coexist" mode (remapped
+# ports) alongside another stack. The console/portal API URLs use the SAME port vars,
+# so remapping stays self-consistent (unlike a host-routed stack). Named volumes
+# persist across `down` (wiped only by `down -v`). Explicit project name so the tool
+# can identify + tear this stack down by name.
 name: gravitee-apim
 
 volumes:
@@ -48,7 +51,7 @@ services:
     image: graviteeio/apim-gateway:${APIM_VERSION:-latest}
     restart: always
     ports:
-      - "8082:8082"
+      - "${APIM_GATEWAY_PORT:-8082}:8082"
     depends_on:
       apim-mongodb:
         condition: service_healthy
@@ -69,7 +72,7 @@ services:
     image: graviteeio/apim-management-api:${APIM_VERSION:-latest}
     restart: always
     ports:
-      - "8083:8083"
+      - "${APIM_MGMT_PORT:-8083}:8083"
     depends_on:
       apim-mongodb:
         condition: service_healthy
@@ -78,8 +81,8 @@ services:
     environment:
       - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_analytics_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
-      - gravitee_installation_standalone_console_url=http://localhost:8084
-      - gravitee_installation_standalone_portal_url=http://localhost:8085
+      - gravitee_installation_standalone_console_url=http://localhost:${APIM_CONSOLE_PORT:-8084}
+      - gravitee_installation_standalone_portal_url=http://localhost:${APIM_PORTAL_PORT:-8085}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8083/management/v2/ui/bootstrap >/dev/null || exit 1"]
       interval: 5s
@@ -90,18 +93,18 @@ services:
     image: graviteeio/apim-management-ui:${APIM_VERSION:-latest}
     restart: always
     ports:
-      - "8084:8080"
+      - "${APIM_CONSOLE_PORT:-8084}:8080"
     depends_on:
       - apim-management-api
     environment:
-      - MGMT_API_URL=http://localhost:8083/management/organizations/DEFAULT/environments/DEFAULT/
+      - MGMT_API_URL=http://localhost:${APIM_MGMT_PORT:-8083}/management/organizations/DEFAULT/environments/DEFAULT/
 
   apim-portal:
     image: graviteeio/apim-portal-ui:${APIM_VERSION:-latest}
     restart: always
     ports:
-      - "8085:8080"
+      - "${APIM_PORTAL_PORT:-8085}:8080"
     depends_on:
       - apim-management-api
     environment:
-      - PORTAL_API_URL=http://localhost:8083/portal/environments/DEFAULT
+      - PORTAL_API_URL=http://localhost:${APIM_MGMT_PORT:-8083}/portal/environments/DEFAULT

@@ -142,32 +142,23 @@ def _overall_hint(overall: str) -> str:
 
 # ── tools ─────────────────────────────────────────────────────────────────────
 @mcp.tool()
-def stack_up(pull: bool = True, coexist: bool = False) -> dict:
+def stack_up(pull: bool = True) -> dict:
     """Start the Gamma demo stack in the background (non-blocking).
 
-    Launches the up in a detached subprocess, redirecting output to .run/up.log,
+    Launches `run.sh` in a detached subprocess, redirecting output to .run/up.log,
     and returns immediately — it never waits, so cold image pulls won't time out
-    your MCP client. Poll `stack_status` to learn when the stack is actually ready.
+    your MCP client. Poll `stack_status` to learn when the stack is ready.
 
-    Two port modes:
-      * default (coexist=False): the stack's canonical ports via `run.sh` — the
-        fully-wired demo (stack_setup, OAuth, edge config all correct). If a
-        canonical port is already taken (e.g. another local stack), this does NOT
-        launch; it returns status "port_conflict" and suggests coexist mode.
-      * coexist=True: every published host port is shifted by GAMMA_PORT_OFFSET
-        (default 20000) via a generated compose overlay, so the stack runs
-        alongside others. Drives `docker compose` directly (the stack's ports are
-        hardcoded and run.sh takes no overlay). Caveat: stack_setup hardcodes a few
-        canonical ports (edge gatewayUrl :8082, :80 OAuth redirect URIs) that can't
-        be fully remapped, so the demo bootstrap is best-effort in this mode.
-        GAMMA_PORT_KEEP (comma-separated services) leaves those on original ports.
+    The Gamma stack runs on its canonical ports (it's strict about them — its
+    consoles hardcode host-routing and :80, so remapping isn't supported). Before
+    launching it pre-checks those ports; if any is already taken (e.g. another local
+    stack), it does NOT launch and returns status "port_conflict" naming the busy
+    ports. Free them (or down the other stack) and retry.
 
     Args:
         pull: Pull images first (default). False uses whatever images are cached.
-        coexist: Run on remapped ports so the stack won't collide with others.
 
-    Only one up at a time: if a tracked up-process is still running this refuses
-    and points you at stack_status.
+    Only one up at a time: a running tracked up-process is refused.
     """
     if state.is_up_running():
         rec = state.current_record()
@@ -187,124 +178,33 @@ def stack_up(pull: bool = True, coexist: bool = False) -> dict:
             "warnings": env["warnings"],
         }
 
-    log_path = runner.up_log_path()
-
-    # ── Default: canonical ports via run.sh (with a conflict preflight) ─────
-    if not coexist:
-        try:
-            busy = runner.ports_in_use(runner.published_host_ports())
-        except (RuntimeError, ValueError):
-            busy = []  # couldn't read config; let run.sh's own preflight handle it
-        if busy:
-            return {
-                "status": "port_conflict",
-                "message": (
-                    f"canonical port(s) already in use: {busy} — likely another local "
-                    "stack (e.g. apim-latest on 8082/8083). The stack was NOT started. "
-                    "Re-run stack_up with coexist=true to bring it up on remapped "
-                    f"ports (shifted by {runner.port_offset()}), or free these ports."
-                ),
-                "busy_ports": busy,
-                "suggest": {"tool": "stack_up", "args": {"coexist": True}},
-            }
-        args = [] if pull else ["--no-pull"]
-        log_path.write_bytes(b"")
-        proc = runner.launch_background(args, log_path)
-        started = _now_iso()
-        state.record_up(proc, log_path, args, started)
-        state.record_mode(coexist=False, offset=0, keep=[])
-        return {
-            "status": "starting", "mode": "canonical", "pid": proc.pid,
-            "log_path": str(log_path), "pull": pull, "started": started,
-            "warnings": env["warnings"],
-            "next": "Poll stack_status to see when services become healthy.",
-        }
-
-    # ── Coexist: generate overlay + drive docker compose directly ───────────
-    offset = runner.port_offset() or runner.DEFAULT_PORT_OFFSET
-    keep = runner.port_keep()
     try:
-        cfg = runner.compose_config_json()
-    except (RuntimeError, ValueError) as e:
-        return {"status": "blocked", "message": f"could not read compose config: {e}"}
-
-    acr_err = runner.acr_probe(cfg)
-    if acr_err:
-        return {"status": "blocked", "message": acr_err, "warnings": env["warnings"]}
-
-    try:
-        overlay_path, mapping = runner.generate_ports_override(offset, keep)
-    except ValueError as e:
-        return {"status": "blocked", "message": str(e)}
-
-    # Port pre-flight on the REMAPPED host ports (mirrors run.sh's own preflight).
-    new_ports = sorted({m["new_host"] for m in mapping})
-    busy = runner.ports_in_use(new_ports)
+        busy = runner.ports_in_use(runner.published_host_ports())
+    except (RuntimeError, ValueError):
+        busy = []  # couldn't read config; let run.sh's own preflight handle it
     if busy:
         return {
-            "status": "blocked",
-            "message": f"remapped port(s) already in use: {busy}. "
-                       "Free them or adjust GAMMA_PORT_OFFSET / GAMMA_PORT_KEEP.",
-            "port_mapping": mapping,
+            "status": "port_conflict",
+            "message": (
+                f"canonical port(s) already in use: {busy} — likely another local "
+                "stack. The Gamma stack was NOT started. Free these ports (or down the "
+                "conflicting stack — e.g. apim_up's down_conflicting, or apim_down) and retry."
+            ),
+            "busy_ports": busy,
         }
 
+    args = [] if pull else ["--no-pull"]
+    log_path = runner.up_log_path()
     log_path.write_bytes(b"")
-    proc = runner.launch_up_compose_background(["-f", str(overlay_path)], pull, log_path)
+    proc = runner.launch_background(args, log_path)
     started = _now_iso()
-    state.record_up(proc, log_path, ["compose", "up", "-d", f"offset={offset}"], started)
-    state.record_mode(coexist=True, offset=offset, keep=sorted(keep))
-
+    state.record_up(proc, log_path, args, started)
     return {
-        "status": "starting",
-        "mode": "coexist",
-        "port_offset": offset,
-        "pid": proc.pid,
-        "log_path": str(log_path),
-        "overlay": str(overlay_path),
-        "pull": pull,
-        "started": started,
-        "port_mapping": mapping,
-        "urls": _url_hints(mapping),
-        "caveats": [
-            "stack_setup will remap AM_URL/APIM_URL/EDGE_REACTOR_PORT, but its "
-            "hardcoded edge gatewayUrl (:8082) and :80 OAuth redirect URIs stay "
-            "canonical — edge/OAuth wiring is best-effort in coexist mode.",
-        ],
+        "status": "starting", "mode": "canonical", "pid": proc.pid,
+        "log_path": str(log_path), "pull": pull, "started": started,
         "warnings": env["warnings"],
-        "next": "Poll stack_status to see when services become healthy (cold pulls take several minutes).",
+        "next": "Poll stack_status to see when services become healthy.",
     }
-
-
-def _sfx(port: int) -> str:
-    return "" if port == 80 else f":{port}"
-
-
-def _url_hints(mapping: list[dict]) -> dict:
-    """Human-friendly access URLs given the (possibly remapped) ports."""
-    by_new = {(m["service"], m["container"]): m["new_host"] for m in mapping}
-    hints = {}
-    nginx = next((m["new_host"] for m in mapping if m["service"] == "nginx"), None)
-    if nginx:
-        hints["UIs (via nginx, Host-routed)"] = {
-            "gamma console": f"http://gamma.localhost{_sfx(nginx)}",
-            "APIM console": f"http://apim.localhost{_sfx(nginx)}",
-            "APIM portal": f"http://portal.localhost{_sfx(nginx)}",
-            "AM webui": f"http://am.localhost{_sfx(nginx)}",
-        }
-        if nginx != 80:
-            hints["UIs (via nginx, Host-routed)"]["note"] = (
-                "OAuth flows registered by stack_setup assume :80; if a redirect "
-                "misbehaves, run with GAMMA_PORT_KEEP=nginx to keep :80."
-            )
-    backends = {
-        "AM mgmt API": by_new.get(("management", 8093)),
-        "AM gateway": by_new.get(("gateway", 8092)),
-        "APIM rest-api": by_new.get(("apim-rest-api", 8083)),
-        "APIM gateway": by_new.get(("apim-gateway", 8082)),
-        "SPIRE JWKS": by_new.get(("spire-oidc", 8443)),
-    }
-    hints["backends (direct)"] = {k: f"http://localhost:{v}" for k, v in backends.items() if v}
-    return hints
 
 
 @mcp.tool()
@@ -325,26 +225,8 @@ def stack_status() -> dict:
     return _summarize()
 
 
-def _coexist_setup_env(offset: int, keep: list[str]) -> dict:
-    """Point setup.sh at the remapped host ports it CAN be told about.
-
-    setup.sh parameterizes AM_URL / APIM_URL / EDGE_REACTOR_PORT (canonical 8093 /
-    8083 / 18072). A service in `keep` stays on its canonical port.
-    """
-    keep_set = set(keep)
-
-    def host(port: int, service: str) -> int:
-        return port if service in keep_set else port + offset
-
-    return {
-        "AM_URL": f"http://localhost:{host(8093, 'management')}",
-        "APIM_URL": f"http://localhost:{host(8083, 'apim-rest-api')}",
-        "EDGE_REACTOR_PORT": str(host(18072, 'apim-gateway')),
-    }
-
-
 @mcp.tool()
-def stack_setup(timeout_seconds: int = 300, coexist: "bool | None" = None) -> dict:
+def stack_setup(timeout_seconds: int = 300) -> dict:
     """Bootstrap the demo environment (`run.sh setup`), run in the foreground.
 
     Waits for AM + APIM + SPIRE to answer, then runs setup.sh. Assumes the stack
@@ -353,38 +235,11 @@ def stack_setup(timeout_seconds: int = 300, coexist: "bool | None" = None) -> di
     Args:
         timeout_seconds: Max wait (default 300 = 5 min). setup can take a minute+;
             if it times out, run it yourself: `cd $GAMMA_STACK_DIR/docker && bash run.sh setup`.
-        coexist: Whether the stack is on remapped ports. Default (None) auto-detects
-            from the last stack_up. When true, AM_URL/APIM_URL/EDGE_REACTOR_PORT are
-            pointed at the remapped ports — but setup.sh's hardcoded edge gatewayUrl
-            (:8082) and :80 OAuth redirect URIs stay canonical (a documented gap).
     """
-    mode = state.read_mode()
-    active = mode.get("coexist", False) if coexist is None else coexist
-
-    caveats = []
-    if active:
-        # Coexist: run setup.sh DIRECTLY with remapped AM_URL/APIM_URL. We can't use
-        # `run.sh setup` here — its wait_healthy gate targets hardcoded canonical
-        # ports (8093/8083/18443) that aren't bound in coexist mode, so it would hang.
-        offset = mode.get("offset") or runner.DEFAULT_PORT_OFFSET
-        keep = mode.get("keep", [])
-        extra_env = _coexist_setup_env(offset, keep)
-        caveats = [
-            f"coexist mode: ran setup.sh directly, pointed at remapped ports {extra_env} "
-            "(run.sh's setup health-gate targets canonical ports and would hang here).",
-            "setup.sh's hardcoded edge gatewayUrl (http://localhost:8082) and :80 "
-            "OAuth redirect URIs are NOT remapped — edge/OAuth wiring is best-effort. "
-            "For a fully-wired demo use canonical ports (stack_up without coexist).",
-            "Run this only after stack_status reports healthy (no health-gate here).",
-        ]
-        result = runner.run_setup_script_direct(timeout_seconds, extra_env)
-    else:
-        result = runner.run_foreground(["setup"], timeout=timeout_seconds)
+    result = runner.run_foreground(["setup"], timeout=timeout_seconds)
     if result["timed_out"]:
         return {
             "status": "timeout",
-            "coexist": active,
-            "caveats": caveats,
             "message": f"setup exceeded {timeout_seconds}s and was left running/killed by the timeout. "
                        "Re-run in your terminal if needed: "
                        "cd $GAMMA_STACK_DIR/docker && bash run.sh setup",
@@ -393,8 +248,6 @@ def stack_setup(timeout_seconds: int = 300, coexist: "bool | None" = None) -> di
         }
     return {
         "status": "ok" if result["returncode"] == 0 else "error",
-        "coexist": active,
-        "caveats": caveats,
         "returncode": result["returncode"],
         "stdout": result["stdout"],
         "stderr": result["stderr"],
@@ -448,47 +301,35 @@ def stack_logs(service: str, lines: int = 100) -> dict:
 
 
 @mcp.tool()
-def stack_ports(coexist: "bool | None" = None) -> dict:
-    """Show the active host-port mapping and access URLs for the stack.
-
-    Reflects how the stack was last brought up (canonical vs coexist / offset /
-    keep-list). Handy after a coexist `stack_up` without re-reading its payload.
-
-    Args:
-        coexist: Override the mode to preview. Default (None) uses the last
-            stack_up mode. Pass true/false to see what either mode's ports would be.
-    """
-    mode = state.read_mode()
-    is_coexist = mode.get("coexist", False) if coexist is None else coexist
+def stack_ports() -> dict:
+    """Show the Gamma stack's host ports and access URLs (canonical)."""
     try:
-        cfg = runner.compose_config_json()
+        mapping = runner.compute_port_mapping(0, set())
     except (RuntimeError, ValueError) as e:
         return {"status": "error", "message": f"could not read compose config: {e}"}
 
-    if is_coexist:
-        offset = mode.get("offset") or runner.DEFAULT_PORT_OFFSET
-        keep = set(mode.get("keep", []))
-    else:
-        offset, keep = 0, set()
-
-    try:
-        mapping = runner.compute_port_mapping(offset, keep, cfg)
-    except ValueError as e:
-        return {"status": "error", "message": str(e)}
-
+    by = {(m["service"], m["container"]): m["new_host"] for m in mapping}
+    backends = {
+        "AM mgmt API": by.get(("management", 8093)),
+        "AM gateway": by.get(("gateway", 8092)),
+        "APIM rest-api": by.get(("apim-rest-api", 8083)),
+        "APIM gateway": by.get(("apim-gateway", 8082)),
+        "SPIRE JWKS": by.get(("spire-oidc", 8443)),
+    }
     return {
         "status": "ok",
-        "mode": "coexist" if is_coexist else "canonical",
-        "offset": offset,
-        "keep": sorted(keep),
-        "source": "last stack_up" if coexist is None else "preview",
-        "ports": [
-            {"service": m["service"], "container": m["container"],
-             "host": m["new_host"], "original": m["old_host"],
-             "remapped": m["new_host"] != m["old_host"]}
-            for m in mapping
-        ],
-        "urls": _url_hints(mapping),
+        "mode": "canonical",
+        "ports": [{"service": m["service"], "container": m["container"], "host": m["new_host"]}
+                  for m in mapping],
+        "urls": {
+            "UIs (via nginx, Host-routed)": {
+                "gamma console": "http://gamma.localhost",
+                "APIM console": "http://apim.localhost",
+                "APIM portal": "http://portal.localhost",
+                "AM webui": "http://am.localhost",
+            },
+            "backends (direct)": {k: f"http://localhost:{v}" for k, v in backends.items() if v},
+        },
     }
 
 
@@ -526,12 +367,13 @@ def stack_uninstall_daemon() -> dict:
 
 
 # ── standalone APIM stack tools ───────────────────────────────────────────────
-def _apim_urls() -> dict:
+def _apim_urls(offset: int = 0) -> dict:
+    g, m, c, p = (8082 + offset, 8083 + offset, 8084 + offset, 8085 + offset)
     return {
-        "console": "http://localhost:8084 (admin/admin)",
-        "portal": "http://localhost:8085",
-        "management API": "http://localhost:8083/management",
-        "gateway": "http://localhost:8082",
+        "console": f"http://localhost:{c} (admin/admin)",
+        "portal": f"http://localhost:{p}",
+        "management API": f"http://localhost:{m}/management",
+        "gateway": f"http://localhost:{g}",
     }
 
 
@@ -565,42 +407,49 @@ def _apim_summarize() -> dict:
     else:
         overall = "partial"
 
+    mode = apim.current_mode()
     return {
         "overall": overall,
         "version": up.get("version") or apim.current_version(),
+        "mode": "coexist" if mode["coexist"] else "canonical",
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
-        "urls": _apim_urls(),
+        "urls": _apim_urls(mode["offset"]),
         "up_log_tail": runner.tail_file(apim.up_log_path(), 40),
         "checked_at": _now_iso(),
     }
 
 
 @mcp.tool()
-def apim_up(version: str = "latest", pull: bool = True,
-            down_conflicting: bool = False, recreate: bool = False) -> dict:
+def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
+            down_conflicting: bool = False, recreate: bool = False,
+            license: str = "") -> dict:
     """Stand up a standalone Gravitee APIM stack (background, non-blocking).
 
-    Self-contained OSS stack (mongo + elasticsearch + gateway + management-api +
-    console + portal) on ports 8082/8083/8084/8085. Pulls the pinned image version
-    and `docker compose up -d`, returning immediately; poll `apim_status`.
+    Self-contained stack (mongo + elasticsearch + gateway + management-api + console
+    + portal). Pulls the pinned image version and `docker compose up -d`, returning
+    immediately; poll `apim_status`.
 
-    Port safety: it checks 8082-8085 first. If another compose project holds any of
-    them (e.g. the Gamma stack), it does NOT start — it returns status
-    "port_conflict" listing the offending project(s). Re-run with
-    down_conflicting=true to bring those projects down first (preserving their data),
-    then start APIM.
+    Ports: default (coexist=False) uses canonical 8082/8083/8084/8085. It checks
+    those first; if another compose project holds any of them (e.g. the Gamma
+    stack), it does NOT start — it returns status "port_conflict" and suggests
+    EITHER down_conflicting=true (down the other stack first, data preserved) OR
+    coexist=true. In coexist mode every host port is shifted by APIM_PORT_OFFSET
+    (default 20000) — and the console/portal are told about the remapped management
+    port — so APIM runs cleanly alongside another stack.
 
     Args:
         version: Image tag to pin. "latest" (default) resolves the newest stable
             release from the APIM repo (e.g. 4.12.8). Pass e.g. "4.12.3" to pin.
         pull: Pull images before up (default).
-        down_conflicting: Down any conflicting compose projects first (no -v; data kept).
-        recreate: `up -d --force-recreate` — reload/recreate containers (e.g. after
-            changing the pinned version).
+        coexist: Run on remapped ports (offset APIM_PORT_OFFSET) alongside another stack.
+        down_conflicting: (canonical only) down conflicting projects first (no -v; data kept).
+        recreate: `up -d --force-recreate` — reload/recreate (e.g. after a version change).
+        license: Path to a Gravitee license.key to mount (enterprise features). Empty =
+            resolve from APIM_LICENSE env, else the Gamma stack's license, else OSS mode.
     """
     if apim.is_up_running():
         return {"status": "already_running",
@@ -614,53 +463,61 @@ def apim_up(version: str = "latest", pull: bool = True,
     if err:
         return {"status": "blocked", "message": err}
 
-    ports = apim.compose_config_ports()
+    offset = apim.port_offset()
+    ports = apim.ports_for(coexist, offset)
+    license_path, license_src = apim.resolve_license(license)
+
     conflicts = apim.detect_conflicts(ports)
+    downed = []
     if conflicts:
         if not down_conflicting:
-            projects = sorted({c["project"] for c in conflicts})
             return {
                 "status": "port_conflict",
                 "version": resolved,
+                "coexist": coexist,
                 "message": (
-                    f"port(s) needed by APIM are held by other stack(s): "
-                    f"{[(c['port'], c['project']) for c in conflicts]}. "
-                    "The APIM stack was NOT started. Re-run apim_up with "
-                    "down_conflicting=true to bring those projects down first "
-                    "(their data volumes are preserved), or free the ports yourself."
+                    f"port(s) needed by APIM ({'coexist' if coexist else 'canonical'}) "
+                    f"are held by other stack(s): {[(c['port'], c['project']) for c in conflicts]}. "
+                    "APIM was NOT started. Either re-run with down_conflicting=true to "
+                    "down the other stack(s) (data preserved)"
+                    + ("" if coexist else ", or run with coexist=true to start APIM on "
+                       f"remapped ports (shifted by {offset})") + "."
                 ),
                 "conflicts": conflicts,
-                "conflicting_projects": projects,
-                "suggest": {"tool": "apim_up",
-                            "args": {"version": version, "down_conflicting": True}},
+                "conflicting_projects": sorted({c["project"] for c in conflicts}),
+                "suggest": (
+                    {"tool": "apim_up", "args": {"version": version, "down_conflicting": True}}
+                    if coexist else
+                    {"down_the_other": {"tool": "apim_up", "args": {"version": version, "down_conflicting": True}},
+                     "run_alongside": {"tool": "apim_up", "args": {"version": version, "coexist": True}}}
+                ),
             }
-        # Down each conflicting project (data preserved). Reset Gamma tracking if it was ours.
-        downed = []
         gamma_project = runner.docker_dir().name
         for proj in sorted({c["project"] for c in conflicts}):
             res = apim.down_project(proj)
             downed.append({"project": proj, "returncode": res["returncode"]})
             if proj == gamma_project:
                 state.forget_up()
-    else:
-        downed = []
 
     log_path = apim.up_log_path()
     log_path.write_bytes(b"")
-    proc = apim.launch_up_background(resolved, pull, recreate, log_path)
+    proc = apim.launch_up_background(resolved, pull, recreate, coexist, offset, license_path, log_path)
     started = _now_iso()
-    apim.record_up(proc, resolved, log_path, started)
+    apim.record_up(proc, resolved, coexist, offset, license_path, log_path, started)
 
     return {
         "status": "starting",
         "version": resolved,
+        "mode": "coexist" if coexist else "canonical",
+        "port_offset": offset if coexist else 0,
         "pid": proc.pid,
         "log_path": str(log_path),
         "pull": pull,
         "recreate": recreate,
+        "license": {"mounted": bool(license_path), "path": license_path, "source": license_src},
         "downed_conflicts": downed,
         "ports": ports,
-        "urls": _apim_urls(),
+        "urls": _apim_urls(offset if coexist else 0),
         "started": started,
         "next": "Poll apim_status until overall: healthy (cold pulls take several minutes).",
     }

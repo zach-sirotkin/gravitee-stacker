@@ -1,0 +1,11 @@
+# License overlay for the standalone APIM stack. Applied by the tool (as an extra
+# `-f`) ONLY when a license file is configured; APIM_LICENSE is set to its absolute
+# path. Mounts the Gravitee license into the gateway + management-api so enterprise
+# features are enabled. Without it the stack runs in OSS mode.
+services:
+  apim-gateway:
+    volumes:
+      - ${APIM_LICENSE}:/opt/graviteeio-gateway/license/license.key:ro
+  apim-management-api:
+    volumes:
+      - ${APIM_LICENSE}:/opt/graviteeio-management-api/license/license.key:ro

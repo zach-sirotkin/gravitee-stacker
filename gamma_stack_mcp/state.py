@@ -133,24 +133,3 @@ def forget_up() -> None:
 
 def current_record() -> Optional[UpRecord]:
     return _record or _load_persisted()
-
-
-# ── last-up mode (default vs coexist) ─────────────────────────────────────────
-def _mode_path() -> Path:
-    return runner.state_dir() / "mode.json"
-
-
-def record_mode(coexist: bool, offset: int, keep: list[str]) -> None:
-    """Remember how the last stack_up was launched, so stack_setup can match it."""
-    _mode_path().write_text(json.dumps(
-        {"coexist": coexist, "offset": offset, "keep": sorted(keep)}, indent=2))
-
-
-def read_mode() -> dict:
-    p = _mode_path()
-    if not p.is_file():
-        return {"coexist": False, "offset": 0, "keep": []}
-    try:
-        return json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {"coexist": False, "offset": 0, "keep": []}
