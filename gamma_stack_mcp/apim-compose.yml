@@ -1,0 +1,107 @@
+# Self-contained standalone Gravitee APIM stack (OSS images), managed by gamma-stack-mcp.
+# Image version is injected via APIM_VERSION (resolved by the tool, e.g. 4.12.8).
+# Named volumes persist across `down` (wiped only by `down -v`). Explicit project
+# name so the tool can identify + tear this stack down by name.
+name: gravitee-apim
+
+volumes:
+  apim-mongo-data:
+  apim-es-data:
+
+services:
+  apim-mongodb:
+    image: mongo:${MONGODB_VERSION:-6.0}
+    restart: always
+    volumes:
+      - apim-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1 || mongo --quiet --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  apim-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-8.8.1}
+    restart: always
+    environment:
+      - http.host=0.0.0.0
+      - transport.host=0.0.0.0
+      - xpack.security.enabled=false
+      - cluster.name=elasticsearch
+      - bootstrap.memory_lock=true
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile: 65536
+    volumes:
+      - apim-es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  apim-gateway:
+    image: graviteeio/apim-gateway:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "8082:8082"
+    depends_on:
+      apim-mongodb:
+        condition: service_healthy
+      apim-elasticsearch:
+        condition: service_healthy
+    environment:
+      - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_ratelimit_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_reporters_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+    healthcheck:
+      # gateway answers HTTP on :8082 once up (404 on / is fine — we only need a connect).
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8082/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  apim-management-api:
+    image: graviteeio/apim-management-api:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "8083:8083"
+    depends_on:
+      apim-mongodb:
+        condition: service_healthy
+      apim-elasticsearch:
+        condition: service_healthy
+    environment:
+      - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_analytics_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_installation_standalone_console_url=http://localhost:8084
+      - gravitee_installation_standalone_portal_url=http://localhost:8085
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/management/v2/ui/bootstrap >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  apim-console:
+    image: graviteeio/apim-management-ui:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "8084:8080"
+    depends_on:
+      - apim-management-api
+    environment:
+      - MGMT_API_URL=http://localhost:8083/management/organizations/DEFAULT/environments/DEFAULT/
+
+  apim-portal:
+    image: graviteeio/apim-portal-ui:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "8085:8080"
+    depends_on:
+      - apim-management-api
+    environment:
+      - PORTAL_API_URL=http://localhost:8083/portal/environments/DEFAULT

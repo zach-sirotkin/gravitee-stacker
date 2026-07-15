@@ -100,6 +100,17 @@ def _child_env() -> dict[str, str]:
 
 
 # ── Environment sanity ────────────────────────────────────────────────────────
+def docker_running_error() -> Optional[str]:
+    """None if docker is on PATH and `docker info` succeeds, else a clear message."""
+    if shutil.which("docker") is None:
+        return "`docker` not on PATH."
+    info = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=20)
+    if info.returncode != 0:
+        last = info.stderr.strip().splitlines()[-1] if info.stderr.strip() else ""
+        return f"Docker does not appear to be running (`docker info` failed). {last}".strip()
+    return None
+
+
 def check_environment() -> dict:
     """Cheap pre-flight so failures read clearly instead of cryptically.
 

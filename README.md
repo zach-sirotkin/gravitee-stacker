@@ -32,6 +32,12 @@ are gitignored.
 
 ## What it exposes
 
+It manages **two independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
+a wrapper over the stack repo's `run.sh`) and a self-contained standalone **APIM**
+stack (`apim_*`, shipped with the tool).
+
+### Gamma stack (`stack_*`)
+
 | Tool                     | What it does                                                                                 |
 | ------------------------ | -------------------------------------------------------------------------------------------- |
 | `stack_up`               | Launches `run.sh` **in the background** (pull + `up -d` + health poll), returns immediately. |
@@ -42,6 +48,33 @@ are gitignored.
 | `stack_ports`            | Shows the active host-port mapping + access URLs (reflects the last up's mode; can preview either). |
 | `stack_install_daemon`   | **Returns the command to run yourself** — does not execute (it self-elevates via sudo).      |
 | `stack_uninstall_daemon` | Same treatment as install.                                                                    |
+
+### Standalone APIM stack (`apim_*`)
+
+A self-contained OSS APIM stack (`apim-compose.yml`, project `gravitee-apim`:
+mongodb + elasticsearch + gateway + management-api + console + portal) on ports
+**8082/8083/8084/8085**. Independent of the Gamma stack.
+
+| Tool                 | What it does                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------- |
+| `apim_up`            | Resolves + pins a release, checks ports, and starts APIM in the background. **On a port conflict it does not start** — returns `port_conflict` naming the offending project(s); pass `down_conflicting=true` to down them first (data preserved). `version="latest"` (default) or a pin like `"4.12.7"`; `recreate=true` to reload/recreate. |
+| `apim_status`        | Overall verdict + per-service health for the `gravitee-apim` project, plus the pinned version and URLs. |
+| `apim_down`          | `docker compose down` (volumes preserved).                                                          |
+| `apim_logs`          | Tail one APIM service.                                                                              |
+| `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
+
+**Ports & versions.** `version="latest"` resolves the newest stable tag from
+`gravitee-io/gravitee-api-management` (e.g. `4.12.8`) → sets `APIM_VERSION` → pulls
+`graviteeio/apim-*:<version>`. Pin a specific tag with `version="4.12.7"`; reload with
+`recreate=true`. UIs are direct (no host-routing): console `http://localhost:8084`
+(admin/admin), portal `http://localhost:8085`, management API `http://localhost:8083/management`,
+gateway `http://localhost:8082`.
+
+**Conflict flow.** Because APIM's ports (8082/8083) overlap the Gamma stack, `apim_up`
+checks first and, if a conflict is found, identifies the exact compose project/containers
+and returns `port_conflict` + a `suggest` payload. It **never auto-downs** — you opt in
+with `down_conflicting=true`, which brings the conflicting project(s) down (no `-v`, so
+their data volumes survive) and, if it was the tool-managed Gamma stack, resets its tracking.
 
 ### The background-process design (the important part)
 

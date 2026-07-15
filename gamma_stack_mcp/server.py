@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
-from . import runner, state
+from . import apim, runner, state
 
 mcp = FastMCP("gamma-stack")
 
@@ -523,6 +523,193 @@ def stack_uninstall_daemon() -> dict:
         "command": cmd,
         "note": "Run this yourself — it self-elevates via sudo and prompts for your password.",
     }
+
+
+# ── standalone APIM stack tools ───────────────────────────────────────────────
+def _apim_urls() -> dict:
+    return {
+        "console": "http://localhost:8084 (admin/admin)",
+        "portal": "http://localhost:8085",
+        "management API": "http://localhost:8083/management",
+        "gateway": "http://localhost:8082",
+    }
+
+
+def _apim_summarize() -> dict:
+    up = apim.up_process_status()
+    rows = apim.compose_ps()
+    expected = apim.service_names()
+    by = {}
+    for r in rows:
+        svc = r.get("Service") or r.get("Name", "?")
+        by[svc] = {
+            "service": svc,
+            "state": r.get("State", r.get("Status", "")),
+            "health": r.get("Health") or None,
+            "exit_code": r.get("ExitCode"),
+            "label": _classify(r.get("State", r.get("Status", "")), r.get("Health", ""), r.get("ExitCode")),
+        }
+    labels = {s: (by[s]["label"] if s in by else "missing") for s in expected}
+
+    all_ok = bool(labels) and all(l in _OK for l in labels.values())
+    nothing = bool(labels) and all(l == "missing" for l in labels.values())
+
+    if up.get("tracked") and up.get("running"):
+        overall = "starting"
+    elif up.get("tracked") and up.get("exit_code") not in (None, 0):
+        overall = "failed"
+    elif not expected or nothing:
+        overall = "down"
+    elif all_ok:
+        overall = "healthy"
+    else:
+        overall = "partial"
+
+    return {
+        "overall": overall,
+        "version": up.get("version") or apim.current_version(),
+        "up_process": up,
+        "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
+                      "label": labels[s]} for s in expected],
+        "problems": [{"service": s, "label": labels[s]} for s in expected
+                     if labels[s] in _BAD or labels[s] == "missing"],
+        "urls": _apim_urls(),
+        "up_log_tail": runner.tail_file(apim.up_log_path(), 40),
+        "checked_at": _now_iso(),
+    }
+
+
+@mcp.tool()
+def apim_up(version: str = "latest", pull: bool = True,
+            down_conflicting: bool = False, recreate: bool = False) -> dict:
+    """Stand up a standalone Gravitee APIM stack (background, non-blocking).
+
+    Self-contained OSS stack (mongo + elasticsearch + gateway + management-api +
+    console + portal) on ports 8082/8083/8084/8085. Pulls the pinned image version
+    and `docker compose up -d`, returning immediately; poll `apim_status`.
+
+    Port safety: it checks 8082-8085 first. If another compose project holds any of
+    them (e.g. the Gamma stack), it does NOT start — it returns status
+    "port_conflict" listing the offending project(s). Re-run with
+    down_conflicting=true to bring those projects down first (preserving their data),
+    then start APIM.
+
+    Args:
+        version: Image tag to pin. "latest" (default) resolves the newest stable
+            release from the APIM repo (e.g. 4.12.8). Pass e.g. "4.12.3" to pin.
+        pull: Pull images before up (default).
+        down_conflicting: Down any conflicting compose projects first (no -v; data kept).
+        recreate: `up -d --force-recreate` — reload/recreate containers (e.g. after
+            changing the pinned version).
+    """
+    if apim.is_up_running():
+        return {"status": "already_running",
+                "message": "An APIM up-process is already running. Use apim_status."}
+
+    docker_err = runner.docker_running_error()
+    if docker_err:
+        return {"status": "blocked", "message": docker_err}
+
+    resolved, err = apim.resolve_version(version)
+    if err:
+        return {"status": "blocked", "message": err}
+
+    ports = apim.compose_config_ports()
+    conflicts = apim.detect_conflicts(ports)
+    if conflicts:
+        if not down_conflicting:
+            projects = sorted({c["project"] for c in conflicts})
+            return {
+                "status": "port_conflict",
+                "version": resolved,
+                "message": (
+                    f"port(s) needed by APIM are held by other stack(s): "
+                    f"{[(c['port'], c['project']) for c in conflicts]}. "
+                    "The APIM stack was NOT started. Re-run apim_up with "
+                    "down_conflicting=true to bring those projects down first "
+                    "(their data volumes are preserved), or free the ports yourself."
+                ),
+                "conflicts": conflicts,
+                "conflicting_projects": projects,
+                "suggest": {"tool": "apim_up",
+                            "args": {"version": version, "down_conflicting": True}},
+            }
+        # Down each conflicting project (data preserved). Reset Gamma tracking if it was ours.
+        downed = []
+        gamma_project = runner.docker_dir().name
+        for proj in sorted({c["project"] for c in conflicts}):
+            res = apim.down_project(proj)
+            downed.append({"project": proj, "returncode": res["returncode"]})
+            if proj == gamma_project:
+                state.forget_up()
+    else:
+        downed = []
+
+    log_path = apim.up_log_path()
+    log_path.write_bytes(b"")
+    proc = apim.launch_up_background(resolved, pull, recreate, log_path)
+    started = _now_iso()
+    apim.record_up(proc, resolved, log_path, started)
+
+    return {
+        "status": "starting",
+        "version": resolved,
+        "pid": proc.pid,
+        "log_path": str(log_path),
+        "pull": pull,
+        "recreate": recreate,
+        "downed_conflicts": downed,
+        "ports": ports,
+        "urls": _apim_urls(),
+        "started": started,
+        "next": "Poll apim_status until overall: healthy (cold pulls take several minutes).",
+    }
+
+
+@mcp.tool()
+def apim_status() -> dict:
+    """Status of the standalone APIM stack: overall verdict + per-service health.
+
+    Two signals like stack_status: the tracked up-process, and `docker compose ps`
+    for the gravitee-apim project. Reports the pinned version and access URLs.
+    """
+    return _apim_summarize()
+
+
+@mcp.tool()
+def apim_down(timeout_seconds: int = 180) -> dict:
+    """Stop the standalone APIM stack (`docker compose down`, volumes preserved)."""
+    result = apim.run_down(timeout_seconds)
+    apim.forget_up()
+    if result["timed_out"]:
+        return {"status": "timeout", "message": f"down exceeded {timeout_seconds}s.",
+                "stdout_tail": (result["stdout"] or "")[-2000:],
+                "stderr_tail": (result["stderr"] or "")[-2000:]}
+    return {"status": "ok" if result["returncode"] == 0 else "error",
+            "returncode": result["returncode"],
+            "stdout": result["stdout"], "stderr": result["stderr"]}
+
+
+@mcp.tool()
+def apim_logs(service: str, lines: int = 100) -> dict:
+    """Tail logs for one APIM service (`docker compose logs --tail=<lines> <service>`)."""
+    valid = apim.service_names()
+    if service not in valid:
+        return {"status": "invalid_service", "message": f"unknown service '{service}'.",
+                "valid_services": valid}
+    p = apim.compose_logs(service, lines)
+    return {"status": "ok" if p.returncode == 0 else "error", "service": service,
+            "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
+
+
+@mcp.tool()
+def apim_latest_version() -> dict:
+    """Resolve the newest stable Gravitee APIM release tag (from the APIM repo)."""
+    resolved, err = apim.resolve_version("latest")
+    if err:
+        return {"status": "error", "message": err}
+    return {"status": "ok", "latest_version": resolved,
+            "repo": "https://github.com/gravitee-io/gravitee-api-management"}
 
 
 def main() -> None:
