@@ -21,18 +21,16 @@ from . import runner
 
 APIM_COMPOSE = Path(__file__).resolve().parent / "apim-compose.yml"
 APIM_LICENSE_COMPOSE = Path(__file__).resolve().parent / "apim-license.yml"
-APIM_PROJECT = "gravitee-apim"
+APIM_PROJECT = "gravitee-apim"  # fallback; real name is read from the compose `name:`
 APIM_REPO = "https://github.com/gravitee-io/gravitee-api-management.git"
-# Canonical host ports: gateway, mgmt-api, console, portal (container ports fixed).
-APIM_PORTS = [8082, 8083, 8084, 8085]
 DEFAULT_PORT_OFFSET = 20000
 
-# compose env var name -> canonical host port (used to build the coexist port env)
-_PORT_VARS = {
-    "APIM_GATEWAY_PORT": 8082,
-    "APIM_MGMT_PORT": 8083,
-    "APIM_CONSOLE_PORT": 8084,
-    "APIM_PORTAL_PORT": 8085,
+# compose service name -> (coexist port env var, canonical default host port, url role)
+_ROLE = {
+    "apim-gateway":        ("APIM_GATEWAY_PORT", 8082, "gateway"),
+    "apim-management-api": ("APIM_MGMT_PORT",    8083, "management API"),
+    "apim-console":        ("APIM_CONSOLE_PORT", 8084, "console"),
+    "apim-portal":         ("APIM_PORTAL_PORT",  8085, "portal"),
 }
 
 
@@ -51,8 +49,19 @@ def _meta_path() -> Path:
     return apim_state_dir() / "up.json"
 
 
+def compose_file() -> Path:
+    """The APIM compose to use: APIM_COMPOSE_FILE if it points at a real file,
+    else the shipped apim-compose.yml."""
+    override = os.environ.get("APIM_COMPOSE_FILE", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file():
+            return p.resolve()
+    return APIM_COMPOSE
+
+
 def compose_args(license_path: Optional[str] = None) -> list[str]:
-    args = ["-f", str(APIM_COMPOSE)]
+    args = ["-f", str(compose_file())]
     if license_path:
         args += ["-f", str(APIM_LICENSE_COMPOSE)]
     return args
@@ -63,16 +72,6 @@ def port_offset() -> int:
         return int(os.environ.get("APIM_PORT_OFFSET", str(DEFAULT_PORT_OFFSET))) or DEFAULT_PORT_OFFSET
     except ValueError:
         return DEFAULT_PORT_OFFSET
-
-
-def ports_for(coexist: bool, offset: int) -> list[int]:
-    return [p + (offset if coexist else 0) for p in APIM_PORTS]
-
-
-def _port_env(coexist: bool, offset: int) -> dict:
-    if not coexist:
-        return {}
-    return {var: str(base + offset) for var, base in _PORT_VARS.items()}
 
 
 # The conventional place to drop a license so `apim_up` finds it with no arg/env.
@@ -101,15 +100,63 @@ def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
     return None, "none (OSS mode)"
 
 
-def _env(version: Optional[str] = None, coexist: bool = False,
-         offset: int = 0, license_path: Optional[str] = None) -> dict:
+def _env(version: str = "latest", extra: Optional[dict] = None) -> dict:
     env = runner._child_env()
-    if version:
-        env["APIM_VERSION"] = version
-    env.update(_port_env(coexist, offset))
-    if license_path:
-        env["APIM_LICENSE"] = license_path
+    env["APIM_VERSION"] = version
+    if extra:
+        env.update(extra)
     return env
+
+
+# ── config-driven port/URL resolution (follows the actual compose file) ────────
+def _config(extra_env: Optional[dict] = None) -> dict:
+    p = subprocess.run(
+        ["docker", "compose", *compose_args(), "config", "--format", "json"],
+        cwd=str(apim_state_dir()), env=_env("latest", extra_env),
+        capture_output=True, text=True, timeout=30,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"`docker compose config` failed: {p.stderr.strip()[:300]}")
+    return json.loads(p.stdout)
+
+
+def _service_ports(cfg: dict) -> dict:
+    """{service_name: [published host ports]} from a rendered compose config."""
+    out = {}
+    for name, s in cfg.get("services", {}).items():
+        ports = [int(pt["published"]) for pt in (s.get("ports") or []) if pt.get("published")]
+        if ports:
+            out[name] = ports
+    return out
+
+
+def project_name() -> str:
+    """The compose project name (from the file's `name:`), for conflict exclusion."""
+    try:
+        return _config().get("name") or APIM_PROJECT
+    except (RuntimeError, ValueError):
+        return APIM_PROJECT
+
+
+def plan_ports(coexist: bool, offset: int) -> dict:
+    """Resolve effective published ports + URLs by reading the ACTUAL compose.
+
+    Reads ports from `docker compose config` (of the shipped OR APIM_COMPOSE_FILE
+    compose), so a user editing ports in the file is reflected in conflict
+    detection and reported URLs. In coexist mode each known service's canonical
+    port (from the file) is shifted by `offset` via the APIM_*_PORT env vars.
+    Returns {port_env, ports, urls} where urls maps role -> host port.
+    """
+    base = _service_ports(_config())  # canonical, straight from the file
+    port_env = {}
+    if coexist:
+        for svc, (var, default, _role) in _ROLE.items():
+            canon = base.get(svc, [default])[0]
+            port_env[var] = str(canon + offset)
+    eff = _service_ports(_config(port_env))
+    ports = sorted({p for lst in eff.values() for p in lst})
+    urls = {role: eff[svc][0] for svc, (_v, _d, role) in _ROLE.items() if svc in eff}
+    return {"port_env": port_env, "ports": ports, "urls": urls}
 
 
 # ── version resolution ────────────────────────────────────────────────────────
@@ -221,11 +268,12 @@ def project_holding_port(port: int) -> Optional[dict]:
 
 
 def detect_conflicts(ports: list[int]) -> list[dict]:
-    """Conflicts on the given ports held by projects OTHER than gravitee-apim itself."""
+    """Conflicts on the given ports held by projects OTHER than the APIM project itself."""
+    proj = project_name()
     conflicts = []
     for port in ports:
         holder = project_holding_port(port)
-        if holder and holder["project"] != APIM_PROJECT:
+        if holder and holder["project"] != proj:
             conflicts.append(holder)
     return conflicts
 
@@ -241,11 +289,15 @@ def down_project(project: str) -> dict:
 
 
 # ── up / down lifecycle ───────────────────────────────────────────────────────
-def launch_up_background(version: str, pull: bool, recreate: bool, coexist: bool,
-                         offset: int, license_path: Optional[str], log_path: Path) -> subprocess.Popen:
+def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dict,
+                         license_path: Optional[str], log_path: Path) -> subprocess.Popen:
     files = " ".join(compose_args(license_path))
     up = f"docker compose {files} up -d" + (" --force-recreate" if recreate else "")
     cmd = (f"docker compose {files} pull && {up}") if pull else up
+
+    extra = dict(port_env or {})
+    if license_path:
+        extra["APIM_LICENSE"] = license_path
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(log_path, "wb")
@@ -253,7 +305,7 @@ def launch_up_background(version: str, pull: bool, recreate: bool, coexist: bool
         proc = subprocess.Popen(
             ["bash", "-c", cmd],
             cwd=str(apim_state_dir()),
-            env=_env(version, coexist, offset, license_path),
+            env=_env(version, extra),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -286,6 +338,9 @@ class ApimUp:
     coexist: bool = False
     offset: int = 0
     license: Optional[str] = None
+    urls: Optional[dict] = None       # role -> host port (resolved from the compose)
+    ports: Optional[list] = None      # effective published host ports
+    compose: Optional[str] = None     # compose file used
     started: Optional[str] = None
     exit_code: Optional[int] = None
 
@@ -295,12 +350,14 @@ _rec: Optional[ApimUp] = None
 
 
 def record_up(proc: subprocess.Popen, version: str, coexist: bool, offset: int,
-              license_path: Optional[str], log_path: Path, started: Optional[str]) -> ApimUp:
+              license_path: Optional[str], urls: Optional[dict], ports: Optional[list],
+              log_path: Path, started: Optional[str]) -> ApimUp:
     global _proc, _rec
     _proc = proc
     _rec = ApimUp(pid=proc.pid, log_path=str(log_path), version=version,
                   coexist=coexist, offset=(offset if coexist else 0),
-                  license=license_path, started=started)
+                  license=license_path, urls=urls, ports=ports,
+                  compose=str(compose_file()), started=started)
     _meta_path().write_text(json.dumps(asdict(_rec), indent=2))
     return _rec
 
@@ -328,7 +385,8 @@ def up_process_status() -> dict:
     if rec is None:
         return {"tracked": False}
     common = {"pid": rec.pid, "version": rec.version, "coexist": rec.coexist,
-              "offset": rec.offset, "license": rec.license,
+              "offset": rec.offset, "license": rec.license, "urls": rec.urls,
+              "ports": rec.ports, "compose": rec.compose,
               "log_path": rec.log_path, "started": rec.started}
     if _proc is not None:
         code = _proc.poll()

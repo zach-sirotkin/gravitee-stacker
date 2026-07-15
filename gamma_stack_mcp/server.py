@@ -367,14 +367,19 @@ def stack_uninstall_daemon() -> dict:
 
 
 # ── standalone APIM stack tools ───────────────────────────────────────────────
-def _apim_urls(offset: int = 0) -> dict:
-    g, m, c, p = (8082 + offset, 8083 + offset, 8084 + offset, 8085 + offset)
-    return {
-        "console": f"http://localhost:{c} (admin/admin)",
-        "portal": f"http://localhost:{p}",
-        "management API": f"http://localhost:{m}/management",
-        "gateway": f"http://localhost:{g}",
-    }
+def _apim_urls(role_ports: dict) -> dict:
+    """Build access URLs from a {role -> host port} map (resolved from the compose)."""
+    role_ports = role_ports or {}
+    out = {}
+    if role_ports.get("console"):
+        out["console"] = f"http://localhost:{role_ports['console']} (admin/admin)"
+    if role_ports.get("portal"):
+        out["portal"] = f"http://localhost:{role_ports['portal']}"
+    if role_ports.get("management API"):
+        out["management API"] = f"http://localhost:{role_ports['management API']}/management"
+    if role_ports.get("gateway"):
+        out["gateway"] = f"http://localhost:{role_ports['gateway']}"
+    return out
 
 
 def _apim_summarize() -> dict:
@@ -408,6 +413,14 @@ def _apim_summarize() -> dict:
         overall = "partial"
 
     mode = apim.current_mode()
+    # URLs from the tracked up (resolved from the compose at up time); if there's no
+    # record (e.g. down), resolve canonical ports from the compose for display.
+    role_ports = up.get("urls")
+    if not role_ports:
+        try:
+            role_ports = apim.plan_ports(mode["coexist"], mode["offset"])["urls"]
+        except (RuntimeError, ValueError):
+            role_ports = {}
     return {
         "overall": overall,
         "version": up.get("version") or apim.current_version(),
@@ -417,7 +430,7 @@ def _apim_summarize() -> dict:
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
-        "urls": _apim_urls(mode["offset"]),
+        "urls": _apim_urls(role_ports),
         "up_log_tail": runner.tail_file(apim.up_log_path(), 40),
         "checked_at": _now_iso(),
     }
@@ -464,8 +477,12 @@ def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
         return {"status": "blocked", "message": err}
 
     offset = apim.port_offset()
-    ports = apim.ports_for(coexist, offset)
     license_path, license_src = apim.resolve_license(license)
+    try:
+        plan = apim.plan_ports(coexist, offset)
+    except (RuntimeError, ValueError) as e:
+        return {"status": "blocked", "message": f"could not read compose config: {e}"}
+    ports, port_env, role_ports = plan["ports"], plan["port_env"], plan["urls"]
 
     conflicts = apim.detect_conflicts(ports)
     downed = []
@@ -501,9 +518,9 @@ def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
 
     log_path = apim.up_log_path()
     log_path.write_bytes(b"")
-    proc = apim.launch_up_background(resolved, pull, recreate, coexist, offset, license_path, log_path)
+    proc = apim.launch_up_background(resolved, pull, recreate, port_env, license_path, log_path)
     started = _now_iso()
-    apim.record_up(proc, resolved, coexist, offset, license_path, log_path, started)
+    apim.record_up(proc, resolved, coexist, offset, license_path, role_ports, ports, log_path, started)
 
     return {
         "status": "starting",
@@ -512,12 +529,13 @@ def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
         "port_offset": offset if coexist else 0,
         "pid": proc.pid,
         "log_path": str(log_path),
+        "compose_file": str(apim.compose_file()),
         "pull": pull,
         "recreate": recreate,
         "license": {"mounted": bool(license_path), "path": license_path, "source": license_src},
         "downed_conflicts": downed,
         "ports": ports,
-        "urls": _apim_urls(offset if coexist else 0),
+        "urls": _apim_urls(role_ports),
         "started": started,
         "next": "Poll apim_status until overall: healthy (cold pulls take several minutes).",
     }

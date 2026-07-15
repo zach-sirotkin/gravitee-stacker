@@ -129,7 +129,21 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 | `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
 | `APIM_PORT_OFFSET` | `20000`                                                 | Host-port shift for `apim_up(coexist=true)`. |
 | `APIM_LICENSE`   | unset                                                      | Default license path for the APIM stack (overridden by `apim_up`'s `license` arg). |
+| `APIM_COMPOSE_FILE` | shipped `apim-compose.yml`                            | Point at your own APIM compose to use instead of the bundled one (see below). |
 | `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` live (per stack). |
+
+**Customizing the APIM stack.** The shipped `apim-compose.yml` is a plain compose
+file. Two ways to change it safely:
+
+- **Edit it in place** — the tool reads the published ports back from `docker compose
+  config`, so changing ports there is reflected in conflict detection and the reported
+  URLs (no desync). Caveat: on a non-editable (wheel/pipx) install the file lives in
+  `site-packages` and a reinstall overwrites it — prefer `APIM_COMPOSE_FILE` for durable
+  edits.
+- **Bring your own** — set `APIM_COMPOSE_FILE=/path/to/your-compose.yml`. The tool uses
+  it for up/down/logs/status and reads the project name + ports from it. For coexist mode
+  to remap ports, your compose should parameterize them as `${APIM_GATEWAY_PORT:-8082}`
+  etc. (as the shipped one does); otherwise it still runs fine on canonical ports.
 
 ### Ports — who owns which mode
 
