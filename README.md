@@ -23,6 +23,7 @@ Documents/
 | `stack_setup`            | Runs `run.sh setup` in the foreground (configurable timeout, default 5 min).                  |
 | `stack_down`             | Runs `run.sh down` (`docker compose down`).                                                   |
 | `stack_logs`             | `docker compose logs --tail=<lines> <service>` for one validated service.                     |
+| `stack_ports`            | Shows the active host-port mapping + access URLs (reflects the last up's mode; can preview either). |
 | `stack_install_daemon`   | **Returns the command to run yourself** — does not execute (it self-elevates via sudo).      |
 | `stack_uninstall_daemon` | Same treatment as install.                                                                    |
 

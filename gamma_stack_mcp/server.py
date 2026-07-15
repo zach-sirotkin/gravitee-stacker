@@ -275,20 +275,27 @@ def stack_up(pull: bool = True, coexist: bool = False) -> dict:
     }
 
 
+def _sfx(port: int) -> str:
+    return "" if port == 80 else f":{port}"
+
+
 def _url_hints(mapping: list[dict]) -> dict:
-    """Human-friendly access URLs given the remapped ports."""
+    """Human-friendly access URLs given the (possibly remapped) ports."""
     by_new = {(m["service"], m["container"]): m["new_host"] for m in mapping}
     hints = {}
     nginx = next((m["new_host"] for m in mapping if m["service"] == "nginx"), None)
     if nginx:
         hints["UIs (via nginx, Host-routed)"] = {
-            "gamma console": f"http://gamma.localhost:{nginx}",
-            "APIM console": f"http://apim.localhost:{nginx}",
-            "APIM portal": f"http://portal.localhost:{nginx}",
-            "AM webui": f"http://am.localhost:{nginx}",
-            "note": "UIs/OAuth flows registered by stack_setup assume :80; if a "
-                    "redirect misbehaves, run with GAMMA_PORT_KEEP=nginx to keep :80.",
+            "gamma console": f"http://gamma.localhost{_sfx(nginx)}",
+            "APIM console": f"http://apim.localhost{_sfx(nginx)}",
+            "APIM portal": f"http://portal.localhost{_sfx(nginx)}",
+            "AM webui": f"http://am.localhost{_sfx(nginx)}",
         }
+        if nginx != 80:
+            hints["UIs (via nginx, Host-routed)"]["note"] = (
+                "OAuth flows registered by stack_setup assume :80; if a redirect "
+                "misbehaves, run with GAMMA_PORT_KEEP=nginx to keep :80."
+            )
     backends = {
         "AM mgmt API": by_new.get(("management", 8093)),
         "AM gateway": by_new.get(("gateway", 8092)),
@@ -437,6 +444,51 @@ def stack_logs(service: str, lines: int = 100) -> dict:
         "lines": lines,
         "returncode": p.returncode,
         "logs": p.stdout or p.stderr,
+    }
+
+
+@mcp.tool()
+def stack_ports(coexist: "bool | None" = None) -> dict:
+    """Show the active host-port mapping and access URLs for the stack.
+
+    Reflects how the stack was last brought up (canonical vs coexist / offset /
+    keep-list). Handy after a coexist `stack_up` without re-reading its payload.
+
+    Args:
+        coexist: Override the mode to preview. Default (None) uses the last
+            stack_up mode. Pass true/false to see what either mode's ports would be.
+    """
+    mode = state.read_mode()
+    is_coexist = mode.get("coexist", False) if coexist is None else coexist
+    try:
+        cfg = runner.compose_config_json()
+    except (RuntimeError, ValueError) as e:
+        return {"status": "error", "message": f"could not read compose config: {e}"}
+
+    if is_coexist:
+        offset = mode.get("offset") or runner.DEFAULT_PORT_OFFSET
+        keep = set(mode.get("keep", []))
+    else:
+        offset, keep = 0, set()
+
+    try:
+        mapping = runner.compute_port_mapping(offset, keep, cfg)
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}
+
+    return {
+        "status": "ok",
+        "mode": "coexist" if is_coexist else "canonical",
+        "offset": offset,
+        "keep": sorted(keep),
+        "source": "last stack_up" if coexist is None else "preview",
+        "ports": [
+            {"service": m["service"], "container": m["container"],
+             "host": m["new_host"], "original": m["old_host"],
+             "remapped": m["new_host"] != m["old_host"]}
+            for m in mapping
+        ],
+        "urls": _url_hints(mapping),
     }
 
 
