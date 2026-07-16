@@ -47,11 +47,11 @@ and this project never touches the Gamma SDK repo's working tree.
 
 ## What it exposes
 
-It manages **two independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
-a wrapper over the stack repo's `run.sh`) and a self-contained standalone **APIM**
-stack (`apim_*`, shipped with the tool). Plus **`doctor`** — a one-call readiness
-check (Docker, license, Gamma SDK) that tells you what's set up and what's missing.
-Run it first.
+It manages **three independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
+a wrapper over the stack repo's `run.sh`), a self-contained standalone **APIM** stack
+(`apim_*`), and a self-contained standalone **AM** (Access Management) stack (`am_*`) —
+the last two shipped with the tool. Plus **`doctor`** — a one-call readiness check
+(Docker, license, Gamma SDK) that tells you what's set up and what's missing. Run it first.
 
 ### Gamma stack (`stack_*`)
 
@@ -79,6 +79,29 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 | `apim_down`          | `docker compose down` (volumes preserved).                                                          |
 | `apim_logs`          | Tail one APIM service.                                                                              |
 | `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
+
+### Standalone AM stack (`am_*`)
+
+A self-contained AM stack (`am-compose.yml`, project `gravitee-am`: nginx + mongo +
+gateway + management-api + console), derived from the official
+`gravitee-access-management` compose with the automation gotchas fixed (no host
+log-file bind-mounts — logs via `am_logs`; nginx routing shipped as a stable file;
+env-driven mongo URIs; no obsolete `version:` key). **Only nginx is published to the
+host** (one port); everything else is internal.
+
+| Tool               | What it does                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------- |
+| `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict` (pick another `port=...` or `down_conflicting=true`). Options: `version` (`"latest"` or e.g. `"4.11.10"`), `port` (default `AM_NGINX_PORT` or 8086), `recreate=true`. |
+| `am_status`        | Overall verdict + per-service health for `gravitee-am`, plus version, port, and URLs. The management API is slow to become ready — status stays `partial` until its healthcheck passes, so wait for `healthy`. |
+| `am_down`          | `docker compose down` (volumes preserved).                                                        |
+| `am_logs`          | Tail one AM service (e.g. `gateway`, `management`).                                                |
+| `am_latest_version`| Resolves the newest stable AM release tag from the repo (via `git ls-remote`).                    |
+
+**Ports & access.** AM needs a single host port (`port`, default 8086). Since it
+overlaps nothing else (Gamma/APIM use 80–8085), it usually just runs; if the port is
+taken it reports the conflict. UIs are path-routed through nginx: console
+`http://localhost:{port}/am/ui/` (admin/adminadmin), management API `…/am/management/`,
+gateway `…/am/`. To run several AM versions at once, give each a different `port`.
 
 **Versions.** `version="latest"` resolves the newest stable tag from
 `gravitee-io/gravitee-api-management` (e.g. `4.12.8`) → sets `APIM_VERSION` → pulls
@@ -130,6 +153,8 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 | `APIM_PORT_OFFSET` | `20000`                                                 | Host-port shift for `apim_up(coexist=true)`. |
 | `APIM_LICENSE`   | unset                                                      | Default license path for the APIM stack (overridden by `apim_up`'s `license` arg). |
 | `APIM_COMPOSE_FILE` | shipped `apim-compose.yml`                            | Point at your own APIM compose to use instead of the bundled one (see below). |
+| `AM_NGINX_PORT`  | `8086`                                                     | Default host port for the AM stack's nginx (overridden by `am_up`'s `port` arg). |
+| `AM_COMPOSE_FILE` | shipped `am-compose.yml`                                  | Point at your own AM compose instead of the bundled one. |
 | `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` live (per stack). |
 
 **Customizing the APIM stack.** The shipped `apim-compose.yml` is a plain compose

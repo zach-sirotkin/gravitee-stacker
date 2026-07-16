@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
-from . import apim, runner, state
+from . import am, apim, runner, state
 
 mcp = FastMCP("gamma-stack")
 
@@ -585,6 +585,173 @@ def apim_latest_version() -> dict:
         return {"status": "error", "message": err}
     return {"status": "ok", "latest_version": resolved,
             "repo": "https://github.com/gravitee-io/gravitee-api-management"}
+
+
+# ── standalone AM (Access Management) stack tools ─────────────────────────────
+def _am_summarize() -> dict:
+    up = am.up_process_status()
+    rows = am.compose_ps()
+    expected = am.service_names()
+    by = {}
+    for r in rows:
+        svc = r.get("Service") or r.get("Name", "?")
+        by[svc] = {
+            "service": svc,
+            "state": r.get("State", r.get("Status", "")),
+            "health": r.get("Health") or None,
+            "exit_code": r.get("ExitCode"),
+            "label": _classify(r.get("State", r.get("Status", "")), r.get("Health", ""), r.get("ExitCode")),
+        }
+    labels = {s: (by[s]["label"] if s in by else "missing") for s in expected}
+    all_ok = bool(labels) and all(l in _OK for l in labels.values())
+    nothing = bool(labels) and all(l == "missing" for l in labels.values())
+
+    if up.get("tracked") and up.get("running"):
+        overall = "starting"
+    elif up.get("tracked") and up.get("exit_code") not in (None, 0):
+        overall = "failed"
+    elif not expected or nothing:
+        overall = "down"
+    elif all_ok:
+        overall = "healthy"
+    else:
+        overall = "partial"
+
+    port = up.get("port") or am.current_port()
+    return {
+        "overall": overall,
+        "version": up.get("version") or am.current_version(),
+        "port": port,
+        "up_process": up,
+        "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
+                      "label": labels[s]} for s in expected],
+        "problems": [{"service": s, "label": labels[s]} for s in expected
+                     if labels[s] in _BAD or labels[s] == "missing"],
+        "urls": am.urls_for(port),
+        "up_log_tail": runner.tail_file(am.up_log_path(), 40),
+        "checked_at": _now_iso(),
+    }
+
+
+@mcp.tool()
+def am_up(version: str = "latest", port: int = 0, pull: bool = True,
+          recreate: bool = False, down_conflicting: bool = False) -> dict:
+    """Stand up a standalone Gravitee Access Management (AM) stack (background).
+
+    Self-contained stack (nginx + mongo + gateway + management-api + console). Only
+    nginx is published to the host; everything else is internal. Pulls the pinned
+    version and `docker compose up -d`, returning immediately; poll `am_status`
+    (the management API is slow to become ready, so wait for overall: healthy).
+
+    Args:
+        version: Image tag to pin (GIO_AM_VERSION). "latest" (default) resolves the
+            newest stable release from the AM repo (e.g. 4.12.1). Pass e.g. "4.11.10".
+        port: Host port for nginx (the only published port). 0 = AM_NGINX_PORT env or
+            8086. If it's taken by another stack, am_up does NOT start — it returns
+            "port_conflict"; pick another port or pass down_conflicting=true.
+        pull: Pull images before up (default).
+        recreate: `up -d --force-recreate` — reload/recreate (e.g. after a version change).
+        down_conflicting: Down the project holding the port first (no -v; data kept).
+    """
+    if am.is_up_running():
+        return {"status": "already_running",
+                "message": "An AM up-process is already running. Use am_status."}
+
+    docker_err = runner.docker_running_error()
+    if docker_err:
+        return {"status": "blocked", "message": docker_err}
+
+    resolved, err = am.resolve_version(version)
+    if err:
+        return {"status": "blocked", "message": err}
+
+    nginx_port = port or am.default_port()
+    conflict = am.conflict_on(nginx_port)
+    downed = []
+    if conflict:
+        if not down_conflicting:
+            return {
+                "status": "port_conflict",
+                "version": resolved,
+                "message": (
+                    f"port {nginx_port} is held by project '{conflict['project']}' "
+                    f"(container {conflict['container']}). AM was NOT started. Pass a "
+                    "different port=..., or down_conflicting=true to free it first."
+                ),
+                "conflict": conflict,
+                "suggest": {
+                    "different_port": {"tool": "am_up", "args": {"version": version, "port": nginx_port + 1}},
+                    "down_the_other": {"tool": "am_up", "args": {"version": version, "down_conflicting": True}},
+                },
+            }
+        res = am.down_project(conflict["project"])
+        downed.append({"project": conflict["project"], "returncode": res["returncode"]})
+        if conflict["project"] == runner.docker_dir().name:
+            state.forget_up()
+
+    log_path = am.up_log_path()
+    log_path.write_bytes(b"")
+    proc = am.launch_up_background(resolved, nginx_port, pull, recreate, log_path)
+    started = _now_iso()
+    am.record_up(proc, resolved, nginx_port, log_path, started)
+
+    return {
+        "status": "starting",
+        "version": resolved,
+        "port": nginx_port,
+        "pid": proc.pid,
+        "log_path": str(log_path),
+        "compose_file": str(am.compose_file()),
+        "pull": pull,
+        "recreate": recreate,
+        "downed_conflicts": downed,
+        "urls": am.urls_for(nginx_port),
+        "started": started,
+        "next": "Poll am_status until overall: healthy (the management API takes a while).",
+    }
+
+
+@mcp.tool()
+def am_status() -> dict:
+    """Status of the standalone AM stack: overall verdict + per-service health, the
+    pinned version, the nginx port, and access URLs."""
+    return _am_summarize()
+
+
+@mcp.tool()
+def am_down(timeout_seconds: int = 180) -> dict:
+    """Stop the standalone AM stack (`docker compose down`, volumes preserved)."""
+    result = am.run_down(timeout_seconds)
+    am.forget_up()
+    if result["timed_out"]:
+        return {"status": "timeout", "message": f"down exceeded {timeout_seconds}s.",
+                "stdout_tail": (result["stdout"] or "")[-2000:],
+                "stderr_tail": (result["stderr"] or "")[-2000:]}
+    return {"status": "ok" if result["returncode"] == 0 else "error",
+            "returncode": result["returncode"],
+            "stdout": result["stdout"], "stderr": result["stderr"]}
+
+
+@mcp.tool()
+def am_logs(service: str, lines: int = 100) -> dict:
+    """Tail logs for one AM service (`docker compose logs --tail=<lines> <service>`)."""
+    valid = am.service_names()
+    if service not in valid:
+        return {"status": "invalid_service", "message": f"unknown service '{service}'.",
+                "valid_services": valid}
+    p = am.compose_logs(service, lines)
+    return {"status": "ok" if p.returncode == 0 else "error", "service": service,
+            "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
+
+
+@mcp.tool()
+def am_latest_version() -> dict:
+    """Resolve the newest stable Gravitee AM release tag (from the AM repo)."""
+    resolved, err = am.resolve_version("latest")
+    if err:
+        return {"status": "error", "message": err}
+    return {"status": "ok", "latest_version": resolved,
+            "repo": "https://github.com/gravitee-io/gravitee-access-management"}
 
 
 @mcp.tool()

@@ -1,0 +1,81 @@
+# Self-contained standalone Gravitee Access Management (AM) stack, managed by
+# gamma-stack-mcp. Derived from the official gravitee-access-management docker/compose,
+# with the gotchas fixed for automated use:
+#   * No host log-file bind-mounts (logs are read via `docker compose logs`), so the
+#     wrong-log-path / file-vs-directory bind-mount traps don't apply.
+#   * nginx routing config shipped as a stable file (AM_NGINX_CONF), mounted read-only.
+#   * Mongo URIs stay env-driven (they override gravitee.yml's localhost default).
+#   * No obsolete `version:` key.
+# Only nginx is published to the host (AM_NGINX_PORT). Version via GIO_AM_VERSION.
+name: gravitee-am
+
+volumes:
+  am-mongo-data:
+
+services:
+  mongodb:
+    image: mongo:${AM_MONGODB_VERSION:-4.2}
+    restart: always
+    volumes:
+      - am-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongo --quiet --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1 || mongosh --quiet --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  gateway:
+    image: graviteeio/am-gateway:${GIO_AM_VERSION:-latest}
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - gravitee_repositories_management_mongodb_uri=mongodb://mongodb:27017/graviteeam?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_repositories_oauth2_mongodb_uri=mongodb://mongodb:27017/graviteeam?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_repositories_gateway_mongodb_uri=mongodb://mongodb:27017/graviteeam?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8092/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  management:
+    image: graviteeio/am-management-api:${GIO_AM_VERSION:-latest}
+    restart: always
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      - gravitee_repositories_management_mongodb_uri=mongodb://mongodb:27017/graviteeam?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_repositories_oauth2_mongodb_uri=mongodb://mongodb:27017/graviteeam?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_dataPlanes_0_id=default
+      - gravitee_dataPlanes_0_type=mongodb
+      - gravitee_dataPlanes_0_mongodb_uri=mongodb://mongodb:27017/graviteeam?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_gateway_url=http://localhost:${AM_NGINX_PORT:-8086}/am
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8093/management/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  webui:
+    image: graviteeio/am-management-ui:${GIO_AM_VERSION:-latest}
+    restart: always
+    depends_on:
+      - management
+    environment:
+      - MGMT_API_URL=http://localhost:${AM_NGINX_PORT:-8086}/am
+      - MGMT_UI_URL=http://localhost:${AM_NGINX_PORT:-8086}/am/ui
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: always
+    ports:
+      - "${AM_NGINX_PORT:-8086}:80"
+    volumes:
+      - ${AM_NGINX_CONF}:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - management
+      - gateway
+      - webui
