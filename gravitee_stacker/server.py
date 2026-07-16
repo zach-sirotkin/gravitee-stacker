@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import am, apim, runner, state
 
-mcp = FastMCP("gamma-stack")
+mcp = FastMCP("gravitee-stacker")
 
 
 def _now_iso() -> str:

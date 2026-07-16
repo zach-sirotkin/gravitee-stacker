@@ -1,4 +1,4 @@
-# gamma-stack-mcp
+# gravitee-stacker
 
 An [MCP](https://modelcontextprotocol.io) server that manages two Gravitee Docker
 stacks from your AI assistant (Claude Code, Cursor, Claude Desktop):
@@ -14,14 +14,14 @@ stacks from your AI assistant (Claude Code, Cursor, Claude Desktop):
 
 **1. Install**
 ```bash
-git clone <this-repo-url> gamma-stack-mcp
-cd gamma-stack-mcp
+git clone <this-repo-url> gravitee-stacker
+cd gravitee-stacker
 python3 -m venv .venv && ./.venv/bin/python -m pip install -e .
 ```
 
 **2. Register it** with your client — Claude Code:
 ```bash
-claude mcp add gamma-stack -- /ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python -m gamma_stack_mcp.server
+claude mcp add gravitee-stacker -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python -m gravitee_stacker.server
 ```
 …or add the JSON block under [Wire it into a client](#wire-it-into-a-client) (Cursor / Claude Desktop use the same block). Use an **absolute** path — clients don't expand `~`.
 
@@ -203,8 +203,8 @@ mid-startup failure.
 ## Install / run
 
 ```bash
-git clone <this-repo-url> gamma-stack-mcp
-cd gamma-stack-mcp
+git clone <this-repo-url> gravitee-stacker
+cd gravitee-stacker
 python3 -m venv .venv          # Python 3.10+
 ./.venv/bin/python -m pip install -e .
 ```
@@ -213,9 +213,9 @@ Run the server directly (stdio transport):
 
 ```bash
 GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk \
-  ./.venv/bin/python -m gamma_stack_mcp.server
+  ./.venv/bin/python -m gravitee_stacker.server
 # or, via the installed console script:
-GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk ./.venv/bin/gamma-stack-mcp
+GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk ./.venv/bin/gravitee-stacker
 ```
 
 ## Wire it into a client
@@ -229,9 +229,9 @@ Add to `~/.claude.json` (or a project `.mcp.json`) under `mcpServers`:
 ```json
 {
   "mcpServers": {
-    "gamma-stack": {
-      "command": "/ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python",
-      "args": ["-m", "gamma_stack_mcp.server"],
+    "gravitee-stacker": {
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python",
+      "args": ["-m", "gravitee_stacker.server"],
       "env": {
         "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk"
       }
@@ -243,15 +243,15 @@ Add to `~/.claude.json` (or a project `.mcp.json`) under `mcpServers`:
 Or with the CLI:
 
 ```bash
-claude mcp add gamma-stack \
+claude mcp add gravitee-stacker \
   --env GAMMA_STACK_DIR=/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk \
-  -- /ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python -m gamma_stack_mcp.server
+  -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python -m gravitee_stacker.server
 ```
 
 > **Paths in the JSON must be absolute** — MCP clients don't expand `~` or `$HOME`.
 > Point `command` at this project's `.venv/bin/python` and `GAMMA_STACK_DIR` at your
 > local checkout of the stack repo. (If you `pipx install` this project, `command`
-> can just be `gamma-stack-mcp`.)
+> can just be `gravitee-stacker`.)
 
 ### Cursor
 
@@ -260,9 +260,9 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 ```json
 {
   "mcpServers": {
-    "gamma-stack": {
-      "command": "/ABSOLUTE/PATH/TO/gamma-stack-mcp/.venv/bin/python",
-      "args": ["-m", "gamma_stack_mcp.server"],
+    "gravitee-stacker": {
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python",
+      "args": ["-m", "gravitee_stacker.server"],
       "env": {
         "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk"
       }

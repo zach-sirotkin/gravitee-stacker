@@ -45,7 +45,7 @@ def state_dir() -> Path:
     if override:
         d = Path(override).expanduser()
     else:
-        # <project root>/.run — parent of the gamma_stack_mcp package dir.
+        # <project root>/.run — parent of the gravitee_stacker package dir.
         d = Path(__file__).resolve().parent.parent / ".run"
     d.mkdir(parents=True, exist_ok=True)
     return d

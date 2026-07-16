@@ -1,4 +1,4 @@
-# Self-contained standalone Gravitee APIM stack (OSS images), managed by gamma-stack-mcp.
+# Self-contained standalone Gravitee APIM stack (OSS images), managed by gravitee-stacker.
 # Image version is injected via APIM_VERSION (resolved by the tool, e.g. 4.12.8).
 # Host ports are parameterized so the tool can run this in "coexist" mode (remapped
 # ports) alongside another stack. The console/portal API URLs use the SAME port vars,

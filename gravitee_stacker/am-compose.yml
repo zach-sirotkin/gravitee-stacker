@@ -1,5 +1,5 @@
 # Self-contained standalone Gravitee Access Management (AM) stack, managed by
-# gamma-stack-mcp. Derived from the official gravitee-access-management docker/compose,
+# gravitee-stacker. Derived from the official gravitee-access-management docker/compose,
 # with the gotchas fixed for automated use:
 #   * No host log-file bind-mounts (logs are read via `docker compose logs`), so the
 #     wrong-log-path / file-vs-directory bind-mount traps don't apply.
