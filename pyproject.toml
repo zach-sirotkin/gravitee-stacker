@@ -1,12 +1,12 @@
 [project]
 name = "gravitee-stacker"
-version = "0.1.0"
-description = "MCP server that manages the Gravitee Gamma demo stack (thin wrapper over docker/run.sh)."
+version = "0.2.0"
+description = "MCP server that stands up and manages local Gravitee Docker stacks (APIM incl. native-Kafka, Access Management, and the Gamma demo) — any version, multiple at once."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Zachary Sirotkin", email = "zachary.sirotkin@graviteesource.com" }]
-keywords = ["mcp", "gravitee", "gamma", "docker", "devtools"]
+keywords = ["mcp", "gravitee", "apim", "access-management", "kafka", "gamma", "docker", "devtools"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -25,12 +25,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# packages includes ALL files under gravitee_stacker/ (composes, kafka certs/config,
+# am nginx conf) — not just .py — so no force-include is needed.
 packages = ["gravitee_stacker"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"gravitee_stacker/apim-compose.yml" = "gravitee_stacker/apim-compose.yml"
-"gravitee_stacker/apim-license.yml" = "gravitee_stacker/apim-license.yml"
-"gravitee_stacker/apim-kafka-compose.yml" = "gravitee_stacker/apim-kafka-compose.yml"
-"gravitee_stacker/kafka" = "gravitee_stacker/kafka"
-"gravitee_stacker/am-compose.yml" = "gravitee_stacker/am-compose.yml"
-"gravitee_stacker/am-nginx.conf" = "gravitee_stacker/am-nginx.conf"
+artifacts = ["*.yml", "*.conf", "*.properties", "*.jks"]

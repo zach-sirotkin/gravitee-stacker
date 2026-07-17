@@ -1,12 +1,18 @@
 # gravitee-stacker
 
-An [MCP](https://modelcontextprotocol.io) server that manages two Gravitee Docker
-stacks from your AI assistant (Claude Code, Cursor, Claude Desktop):
+An [MCP](https://modelcontextprotocol.io) server that stands up and manages local
+Gravitee Docker stacks from your AI assistant (Claude Code, Cursor, Claude Desktop) —
+launch any release on command, run several at once, no hand-rolled compose files.
 
-- **Standalone APIM** (`apim_*`) — a self-contained, ready-to-run API Management
-  stack. **Needs only Docker.** Pulls any release you pick and stands it up.
-- **Gamma demo** (`stack_*`) — a thin wrapper over the Gamma SDK's `docker/run.sh`.
-  Needs the SDK repo + registry access (below).
+- **Standalone APIM** (`apim_*`) — a self-contained API Management stack; **needs only
+  Docker**. Variants: `default` (OSS) and `kafka` (native-Kafka gateway).
+- **Standalone AM** (`am_*`) — a self-contained Access Management stack; needs only Docker.
+- **Gamma demo** (`stack_*`) — a thin wrapper over the Gamma SDK's `docker/run.sh`;
+  needs the SDK repo + registry access (below).
+
+APIM and AM support **named instances** so you can run multiple stacks of the same kind
+at once (generalized coexist). A guided-launch helper (`stack_preflight`) resolves the
+version, checks ports, and offers down-vs-coexist on a conflict.
 
 ## Quickstart
 
@@ -50,8 +56,19 @@ and this project never touches the Gamma SDK repo's working tree.
 It manages **three independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
 a wrapper over the stack repo's `run.sh`), a self-contained standalone **APIM** stack
 (`apim_*`), and a self-contained standalone **AM** (Access Management) stack (`am_*`) —
-the last two shipped with the tool. Plus **`doctor`** — a one-call readiness check
-(Docker, license, Gamma SDK) that tells you what's set up and what's missing. Run it first.
+the last two shipped with the tool.
+
+Two meta tools:
+
+| Tool              | What it does                                                                                          |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `doctor`          | One-call readiness check (Docker, license, Gamma SDK) — what's set up and what's missing. Run it first. |
+| `stack_preflight` | Guided-launch preview (no side effects): resolves the version, computes the ports, checks conflicts, and returns the options — `start`, or on conflict `down_conflicting` vs `coexist`. Use it to ask the user which path before launching. |
+
+**Recommended launch flow:** when asked to bring up a stack, (1) confirm the **version**
+(latest or a tag) and — for APIM — the **variant** (default/kafka); (2) `stack_preflight`;
+(3) on a conflict, offer **down the other stack** vs **coexist** (a named instance); then
+`apim_up`/`am_up`.
 
 ### Gamma stack (`stack_*`)
 
@@ -74,10 +91,11 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 
 | Tool                 | What it does                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------- |
-| `apim_up`            | Resolves + pins a release, checks ports, and starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `coexist=true` (remapped ports, run alongside another stack), `down_conflicting=true` (down the other stack first), `recreate=true` (reload), `license="/path/to/license.key"`. |
-| `apim_status`        | Overall verdict + per-service health for the `gravitee-apim` project, plus the pinned version, mode, and URLs. |
-| `apim_down`          | `docker compose down` (volumes preserved).                                                          |
-| `apim_logs`          | Tail one APIM service.                                                                              |
+| `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
+| `apim_status`        | Overall verdict + per-service health, pinned version, variant, project, and URLs. Takes `instance`. |
+| `apim_list`          | List all tracked APIM instances with their status/version/URLs.                                    |
+| `apim_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
+| `apim_logs`          | Tail one APIM service. Takes `instance`.                                                            |
 | `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
 
 ### Standalone AM stack (`am_*`)
@@ -91,10 +109,11 @@ host** (one port); everything else is internal.
 
 | Tool               | What it does                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------- |
-| `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict` (pick another `port=...` or `down_conflicting=true`). Options: `version` (`"latest"` or e.g. `"4.11.10"`), `port` (default `AM_NGINX_PORT` or 8086), `recreate=true`. |
-| `am_status`        | Overall verdict + per-service health for `gravitee-am`, plus version, port, and URLs. The management API is slow to become ready — status stays `partial` until its healthcheck passes, so wait for `healthy`. |
-| `am_down`          | `docker compose down` (volumes preserved).                                                        |
-| `am_logs`          | Tail one AM service (e.g. `gateway`, `management`).                                                |
+| `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.11.10"`), `instance` (run several at once), `port` (default `AM_NGINX_PORT` or 8086), `recreate=true`, `down_conflicting=true`. |
+| `am_status`        | Overall verdict + per-service health, version, port, project, URLs. Takes `instance`. The management API is slow — status stays `partial` until its healthcheck passes, so wait for `healthy`. |
+| `am_list`          | List all tracked AM instances with their status/version/port/URLs.                                |
+| `am_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
+| `am_logs`          | Tail one AM service (e.g. `gateway`, `management`). Takes `instance`.                               |
 | `am_latest_version`| Resolves the newest stable AM release tag from the repo (via `git ls-remote`).                    |
 
 **Ports & access.** AM needs a single host port (`port`, default 8086). Since it
@@ -130,11 +149,11 @@ listeners assume fixed ports). Up to ~3 concurrent APIM instances fit before the
 port bands run out (offset cap 40000).
 
 **Versions.** `version="latest"` resolves the newest stable tag from
-`gravitee-io/gravitee-api-management` (e.g. `4.12.8`) → sets `APIM_VERSION` → pulls
+`gravitee-io/gravitee-api-management` → sets `APIM_VERSION` → pulls
 `graviteeio/apim-*:<version>`. Pin a tag with `version="4.12.7"`; reload/recreate with
 `recreate=true`. UIs are direct (no host-routing): console `http://localhost:8084`
 (admin/admin), portal `:8085`, management API `:8083/management`, gateway `:8082`
-(add `APIM_PORT_OFFSET`, default 20000, in coexist mode).
+(a named instance shifts these by `APIM_PORT_OFFSET`, default 20000 — see coexist below).
 
 **License.** To run with enterprise features, drop a Gravitee license at the
 conventional path **`~/.gravitee/license.key`** and `apim_up` mounts it into the
@@ -143,12 +162,12 @@ gateway + management-api automatically. Resolution order: `license="/path/..."` 
 overlay (`apim-license.yml`) only when a real, non-empty license file is found (a
 phantom bind-mount directory is skipped). `apim_up`'s result reports which source was used.
 
-**Conflict flow.** `apim_up` checks its target ports first (canonical, or remapped in
-coexist mode). On a conflict it identifies the exact compose project/containers and
-returns `port_conflict` + a `suggest` payload — it **never auto-downs**. In canonical
-mode `suggest` offers both `run_alongside` (`coexist=true`) and `down_the_other`
-(`down_conflicting=true`); the latter brings the conflicting project(s) down (no `-v`,
-data preserved) and resets Gamma's tracking if it was the tool-managed stack.
+**Conflict flow.** `apim_up` checks its target ports first. On a conflict it identifies
+the exact compose project/containers and returns `port_conflict` + a `suggest` payload —
+it **never auto-downs**. `suggest` offers `down_the_other` (`down_conflicting=true`,
+which downs the conflicting project without `-v` so data is preserved) and, for the
+default instance, `run_another_instance` (a named `instance` on a shifted port band).
+Prefer `stack_preflight` up front so you can present these choices before launching.
 
 **Kafka variant** — `apim_up(variant="kafka")` brings up the **native-Kafka gateway**
 stack (project `gravitee-apim-kafka`: adds a KRaft broker + kafka-client; the gateway
@@ -203,7 +222,7 @@ PID-liveness of the tracked up-process, and (2) real health parsed from
 | `GAMMA_STACK_DIR`| `~/gravitee-gamma-modules-sdk` (override this) | Path to your checkout of the stack repo. All Gamma calls run in `$GAMMA_STACK_DIR/docker`. |
 | `ESM_MESH`       | unset                                                      | If set, adds the ESM Kafka-mesh overlay (matches `run.sh`). |
 | `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
-| `APIM_PORT_OFFSET` | `20000`                                                 | Host-port shift for `apim_up(coexist=true)`. |
+| `APIM_PORT_OFFSET` | `20000`                                                 | Host-port band size for named APIM instances (coexist). |
 | `APIM_LICENSE`   | unset                                                      | Default license path for the APIM stack (overridden by `apim_up`'s `license` arg). |
 | `APIM_COMPOSE_FILE` | shipped `apim-compose.yml`                            | Point at your own APIM compose to use instead of the bundled one (see below). |
 | `AM_NGINX_PORT`  | `8086`                                                     | Default host port for the AM stack's nginx (overridden by `am_up`'s `port` arg). |
@@ -231,12 +250,12 @@ file. Two ways to change it safely:
   `port_conflict` (`busy_ports`) without starting. Free them (or down the other stack)
   and retry. UIs: `http://gamma.localhost`, `apim.localhost`, `portal.localhost`,
   `am.localhost` (all via nginx on `:80`).
-- **APIM supports coexist** (`apim_up(coexist=true)`), because it uses direct
-  `localhost` ports and the compose parameterizes both the ports *and* the
-  console/portal API URLs — so a remap stays self-consistent. Ports shift by
-  `APIM_PORT_OFFSET` (default 20000): gateway `28082`, mgmt-api `28083`, console
-  `28084`, portal `28085`. This lets APIM run **alongside** Gamma (or any stack on
-  8082/8083) with fully-working consoles.
+- **APIM & AM support coexist** via named `instance`s (see "Running multiple stacks at
+  once" above), because their composes parameterize both the ports *and* the
+  console/portal API URLs — so a remap stays self-consistent. A named APIM instance
+  shifts by `APIM_PORT_OFFSET` (default 20000): gateway `28082`, mgmt-api `28083`,
+  console `28084`, portal `28085`. This lets a second APIM run **alongside** the first
+  (or alongside Gamma) with fully-working consoles.
 
 Runtime state (tracked up-process metadata + `up.log`, per stack) lives in **this
 project's** `.run/` directory (gitignored here) — kept out of the stack repo so it
@@ -335,12 +354,21 @@ stack_logs("apim-rest-api")    → tail a service
 stack_down                     → tears the stack down
 ```
 
-Standalone APIM stack (can run alongside Gamma):
+Standalone APIM stack (guided launch):
 ```
-apim_up(version="latest")               → starting; on port_conflict, either:
-   ├─ apim_up(coexist=true)             → run alongside on 28082-28085
-   └─ apim_up(down_conflicting=true)    → down the other stack first
-apim_status  (repeat)                   → overall: healthy  (console http://localhost:8084)
-apim_up(version="4.12.7", recreate=true)→ pin a different release + recreate
-apim_down                               → tears the APIM stack down
+stack_preflight(kind="apim", version="latest")   → resolves version, checks ports:
+   status "clear"    → apim_up(version="latest")
+   status "conflict" → ask the user, then either:
+      ├─ apim_up(down_conflicting=true)           → down the other stack first
+      └─ apim_up(instance="b")                    → run alongside on 28082-28085
+apim_status  (repeat)                    → overall: healthy  (console http://localhost:8084)
+apim_up(version="4.12.7", recreate=true) → pin a different release + recreate
+apim_list                                → see every running instance
+apim_down(instance="b")                  → tear down one instance (volumes preserved)
+```
+
+Kafka variant + multiple instances:
+```
+apim_up(variant="kafka", version="4.11.12")   → native-Kafka gateway (EE license), :9092
+am_up(instance="a")   /   am_up(instance="b")  → two AM stacks at once (8086 / 8087)
 ```
