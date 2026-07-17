@@ -124,6 +124,20 @@ mode `suggest` offers both `run_alongside` (`coexist=true`) and `down_the_other`
 (`down_conflicting=true`); the latter brings the conflicting project(s) down (no `-v`,
 data preserved) and resets Gamma's tracking if it was the tool-managed stack.
 
+**Kafka variant** — `apim_up(variant="kafka")` brings up the **native-Kafka gateway**
+stack (project `gravitee-apim-kafka`: adds a KRaft broker + kafka-client; the gateway
+also binds a Kafka listener on **:9092** TLS/SNI). Vendored from Gravitee's official
+`native-kafka` quickstart (demo `*.kafka.local` certs + KRaft config) with the known
+gotchas designed out (no `gio_apim_*` name collisions, a real kafka healthcheck, restart
+policies, trimmed kibana/mailhog/kafka-ui, no fragile host mounts). **Requires an EE
+license with the Kafka feature** (blocks otherwise — the gateway won't bind :9092
+without it). Pin a Kafka-tested version (e.g. `version="4.11.12"`). Runs on default
+ports; coexist isn't supported for this variant yet. After healthy, verify with
+`apim_logs("apim-gateway")` → `Kafka server ready to accept connections on port 9092`,
+then in the console set **Default Kafka Domain = `kafka.local`** and create a Kafka API
+(host prefix `foo`, endpoint `kafka:9091`); clients bootstrap at `foo.kafka.local:9092`.
+Wants Docker >= 16 GiB.
+
 ### The background-process design (the important part)
 
 `stack_up` uses `subprocess.Popen` (never `subprocess.run`), redirects stdout+stderr
