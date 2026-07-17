@@ -457,7 +457,8 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
 
     Pulls the pinned version and `docker compose -p <project> up -d`, returning
     immediately; poll `apim_status(instance)`. On a port conflict it does NOT start —
-    returns "port_conflict".
+    returns "port_conflict". Tip: for a user-facing bring-up, call `stack_preflight`
+    first (ask version + variant, then offer down-vs-coexist on conflict).
 
     Args:
         version: Image tag to pin ("latest" resolves the newest stable APIM release).
@@ -856,6 +857,90 @@ def am_latest_version() -> dict:
         return {"status": "error", "message": err}
     return {"status": "ok", "latest_version": resolved,
             "repo": "https://github.com/gravitee-io/gravitee-access-management"}
+
+
+@mcp.tool()
+def stack_preflight(kind: str = "apim", version: str = "latest", variant: str = "default") -> dict:
+    """Preview a stack bring-up WITHOUT starting it — the guided-launch helper.
+
+    Resolves the version, computes the stack's canonical host ports, and checks whether
+    anything already holds them. Returns a structured recommendation so you can ask the
+    user which path they want BEFORE launching:
+      * status "clear"    → ports free; use the returned `start` option.
+      * status "conflict" → ports held; present the user with `down_conflicting` (free
+        the ports by downing the other stack) OR `coexist` (run the new stack alongside
+        as a named instance on shifted ports), and let them choose.
+
+    RECOMMENDED FLOW when a user asks to bring up a stack:
+      1. Ask which VERSION (latest, or a specific tag) and — for APIM — which VARIANT
+         (default | kafka).
+      2. Call stack_preflight with those.
+      3. If status is "conflict", ask the user: down the conflicting stack, or run in
+         coexist mode? Then call apim_up/am_up with the chosen option (down_conflicting
+         or a named `instance`). If "clear", just call the `start` option.
+
+    Args:
+        kind: "apim" or "am".
+        version: "latest" or a specific tag (e.g. "4.12.7").
+        variant: APIM only — "default" or "kafka".
+    """
+    kind = kind.lower()
+    if kind not in ("apim", "am"):
+        return {"status": "error", "message": "kind must be 'apim' or 'am'."}
+
+    if kind == "apim":
+        if variant not in apim.VARIANTS:
+            return {"status": "error", "message": f"unknown variant '{variant}'; use {list(apim.VARIANTS)}."}
+        resolved, err = apim.resolve_version(version)
+        if err:
+            return {"status": "error", "message": err}
+        try:
+            ports = apim.plan_ports(0, variant)["ports"]
+        except (RuntimeError, ValueError) as e:
+            return {"status": "error", "message": f"could not read compose config: {e}"}
+        conflicts = apim.detect_conflicts(ports, variant, "default")
+        can_coexist = apim.supports_instances(variant)
+        up_tool, up_base = "apim_up", {"version": version, "variant": variant}
+        coexist_ports = apim.plan_ports(apim.DEFAULT_PORT_OFFSET, variant)["ports"] if can_coexist else None
+        license_note = ("the kafka variant needs an EE license with the Kafka feature"
+                        if variant == "kafka" else None)
+    else:
+        resolved, err = am.resolve_version(version)
+        if err:
+            return {"status": "error", "message": err}
+        port = am.default_port()
+        ports = [port]
+        holder = am.conflict_on(port, "default")
+        conflicts = [holder] if holder else []
+        can_coexist, up_tool, up_base = True, "am_up", {"version": version}
+        coexist_ports, license_note = None, None
+
+    if not conflicts:
+        return {
+            "status": "clear", "kind": kind, "resolved_version": resolved,
+            "variant": variant if kind == "apim" else None, "ports": ports,
+            "license_note": license_note,
+            "message": f"ports {ports} are free — ready to start {kind} {resolved}.",
+            "options": {"start": {"tool": up_tool, "args": up_base}},
+        }
+
+    options = {"down_conflicting": {"tool": up_tool, "args": {**up_base, "down_conflicting": True}}}
+    if can_coexist:
+        options["coexist"] = {"tool": up_tool, "args": {**up_base, "instance": "b"},
+                              "ports": coexist_ports or "next free port"}
+    return {
+        "status": "conflict", "kind": kind, "resolved_version": resolved,
+        "variant": variant if kind == "apim" else None, "ports": ports,
+        "license_note": license_note,
+        "conflicts": conflicts,
+        "conflicting_projects": sorted({c["project"] for c in conflicts}),
+        "message": (
+            f"{kind} {resolved} needs port(s) {sorted({c['port'] for c in conflicts})}, held by "
+            f"{sorted({c['project'] for c in conflicts})}. Ask the user: down the conflicting "
+            "stack (down_conflicting), or run the new one in coexist mode (a named instance on "
+            "shifted ports)?"),
+        "options": options,
+    }
 
 
 @mcp.tool()
