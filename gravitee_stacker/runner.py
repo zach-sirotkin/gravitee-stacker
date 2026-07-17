@@ -94,6 +94,18 @@ def docker_running_error() -> Optional[str]:
     return None
 
 
+def docker_total_memory_gib() -> Optional[float]:
+    """Docker VM total memory in GiB (for the Kafka stack's >=16 GiB advisory), or None."""
+    r = subprocess.run(["docker", "info", "--format", "{{.MemTotal}}"],
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        return None
+    try:
+        return int(r.stdout.strip()) / (1024 ** 3)
+    except ValueError:
+        return None
+
+
 def check_environment() -> dict:
     """Cheap pre-flight so failures read clearly instead of cryptically.
 

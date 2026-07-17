@@ -1,10 +1,15 @@
 """Standalone Gravitee APIM stack management (separate from the Gamma stack).
 
-Ships a self-contained compose (``apim-compose.yml``, project ``gravitee-apim``) on
-OSS images pinned by ``APIM_VERSION``. Provides: resolve the latest release, detect
-host-port conflicts with other running compose projects (and identify/down them),
-and bring the stack up/down. All lifecycle mirrors the Gamma tools' non-blocking
-background pattern.
+Ships self-contained composes pinned by ``APIM_VERSION``:
+  * variant "default" — apim-compose.yml (project gravitee-apim): OSS mongo + es +
+    gateway + management-api + console + portal.
+  * variant "kafka"   — apim-kafka-compose.yml (project gravitee-apim-kafka): the
+    native-Kafka gateway stack (adds a KRaft broker + kafka-client; requires an EE
+    license with the Kafka feature). Vendored from Gravitee's official native-kafka
+    quickstart with the automation gotchas designed out.
+
+Provides: resolve the latest release, detect host-port conflicts, and bring the
+stack up/down (non-blocking background pattern).
 """
 
 from __future__ import annotations
@@ -19,11 +24,16 @@ from typing import Optional
 
 from . import runner
 
-APIM_COMPOSE = Path(__file__).resolve().parent / "apim-compose.yml"
-APIM_LICENSE_COMPOSE = Path(__file__).resolve().parent / "apim-license.yml"
+_HERE = Path(__file__).resolve().parent
+APIM_COMPOSE = _HERE / "apim-compose.yml"
+APIM_LICENSE_COMPOSE = _HERE / "apim-license.yml"
+APIM_KAFKA_COMPOSE = _HERE / "apim-kafka-compose.yml"
+KAFKA_DIR = _HERE / "kafka"  # vendored certs/config/client-config
 APIM_PROJECT = "gravitee-apim"  # fallback; real name is read from the compose `name:`
 APIM_REPO = "https://github.com/gravitee-io/gravitee-api-management.git"
 DEFAULT_PORT_OFFSET = 20000
+
+VARIANTS = ("default", "kafka")
 
 # compose service name -> (coexist port env var, canonical default host port, url role)
 _ROLE = {
@@ -32,6 +42,11 @@ _ROLE = {
     "apim-console":        ("APIM_CONSOLE_PORT", 8084, "console"),
     "apim-portal":         ("APIM_PORTAL_PORT",  8085, "portal"),
 }
+
+
+def requires_license(variant: str) -> bool:
+    """The Kafka gateway won't bind its :9092 listener without an EE Kafka license."""
+    return variant == "kafka"
 
 
 # ── paths / env ───────────────────────────────────────────────────────────────
@@ -49,9 +64,10 @@ def _meta_path() -> Path:
     return apim_state_dir() / "up.json"
 
 
-def compose_file() -> Path:
-    """The APIM compose to use: APIM_COMPOSE_FILE if it points at a real file,
-    else the shipped apim-compose.yml."""
+def compose_file(variant: str = "default") -> Path:
+    """The compose to use for the variant. For "default", APIM_COMPOSE_FILE overrides."""
+    if variant == "kafka":
+        return APIM_KAFKA_COMPOSE
     override = os.environ.get("APIM_COMPOSE_FILE", "").strip()
     if override:
         p = Path(override).expanduser()
@@ -60,9 +76,10 @@ def compose_file() -> Path:
     return APIM_COMPOSE
 
 
-def compose_args(license_path: Optional[str] = None) -> list[str]:
-    args = ["-f", str(compose_file())]
-    if license_path:
+def compose_args(license_path: Optional[str] = None, variant: str = "default") -> list[str]:
+    args = ["-f", str(compose_file(variant))]
+    # The kafka compose mounts the license directly; only "default" uses the overlay.
+    if variant == "default" and license_path:
         args += ["-f", str(APIM_LICENSE_COMPOSE)]
     return args
 
@@ -75,16 +92,14 @@ def port_offset() -> int:
 
 
 # The conventional place to drop a license so `apim_up` finds it with no arg/env.
-# Override with the `license` arg or APIM_LICENSE env.
 DEFAULT_LICENSE_PATH = Path.home() / ".gravitee" / "license.key"
 
 
 def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
     """Resolve the license file path. Returns (abs_path_or_None, source).
 
-    Order: explicit arg -> APIM_LICENSE env -> the conventional
-    ~/.gravitee/license.key -> none (OSS mode). A candidate is used only if it's a
-    real, non-empty file (so a phantom bind-mount directory is skipped).
+    Order: explicit arg -> APIM_LICENSE env -> ~/.gravitee/license.key -> none.
+    A candidate is used only if it's a real, non-empty file.
     """
     candidates = [
         (license_arg, "argument"),
@@ -100,19 +115,30 @@ def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
     return None, "none (OSS mode)"
 
 
-def _env(version: str = "latest", extra: Optional[dict] = None) -> dict:
+def _env(version: str = "latest", extra: Optional[dict] = None,
+         variant: str = "default", license_path: Optional[str] = None) -> dict:
     env = runner._child_env()
     env["APIM_VERSION"] = version
+    if variant == "kafka":
+        # Absolute paths to the vendored assets the kafka compose bind-mounts.
+        env["KAFKA_SSL_DIR"] = str(KAFKA_DIR / "ssl")
+        env["KAFKA_SERVER_PROPS"] = str(KAFKA_DIR / "config" / "server.properties")
+        env["KAFKA_CLIENT_CONFIG_DIR"] = str(KAFKA_DIR / "client-config")
+        # ${APIM_LICENSE} must render so `docker compose config/ps/down` can parse the
+        # mount; real license at up-time, a harmless existing file otherwise.
+        env["APIM_LICENSE"] = license_path or str(KAFKA_DIR / "ssl" / "kafka_server_jaas.conf")
+    if license_path:
+        env["APIM_LICENSE"] = license_path
     if extra:
         env.update(extra)
     return env
 
 
 # ── config-driven port/URL resolution (follows the actual compose file) ────────
-def _config(extra_env: Optional[dict] = None) -> dict:
+def _config(extra_env: Optional[dict] = None, variant: str = "default") -> dict:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(), "config", "--format", "json"],
-        cwd=str(apim_state_dir()), env=_env("latest", extra_env),
+        ["docker", "compose", *compose_args(variant=variant), "config", "--format", "json"],
+        cwd=str(apim_state_dir()), env=_env("latest", extra_env, variant),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -121,7 +147,6 @@ def _config(extra_env: Optional[dict] = None) -> dict:
 
 
 def _service_ports(cfg: dict) -> dict:
-    """{service_name: [published host ports]} from a rendered compose config."""
     out = {}
     for name, s in cfg.get("services", {}).items():
         ports = [int(pt["published"]) for pt in (s.get("ports") or []) if pt.get("published")]
@@ -130,30 +155,28 @@ def _service_ports(cfg: dict) -> dict:
     return out
 
 
-def project_name() -> str:
+def project_name(variant: str = "default") -> str:
     """The compose project name (from the file's `name:`), for conflict exclusion."""
+    fallback = "gravitee-apim-kafka" if variant == "kafka" else APIM_PROJECT
     try:
-        return _config().get("name") or APIM_PROJECT
+        return _config(variant=variant).get("name") or fallback
     except (RuntimeError, ValueError):
-        return APIM_PROJECT
+        return fallback
 
 
-def plan_ports(coexist: bool, offset: int) -> dict:
+def plan_ports(coexist: bool, offset: int, variant: str = "default") -> dict:
     """Resolve effective published ports + URLs by reading the ACTUAL compose.
 
-    Reads ports from `docker compose config` (of the shipped OR APIM_COMPOSE_FILE
-    compose), so a user editing ports in the file is reflected in conflict
-    detection and reported URLs. In coexist mode each known service's canonical
+    Returns {port_env, ports, urls}. In coexist mode each known service's canonical
     port (from the file) is shifted by `offset` via the APIM_*_PORT env vars.
-    Returns {port_env, ports, urls} where urls maps role -> host port.
     """
-    base = _service_ports(_config())  # canonical, straight from the file
+    base = _service_ports(_config(variant=variant))
     port_env = {}
     if coexist:
         for svc, (var, default, _role) in _ROLE.items():
             canon = base.get(svc, [default])[0]
             port_env[var] = str(canon + offset)
-    eff = _service_ports(_config(port_env))
+    eff = _service_ports(_config(port_env, variant))
     ports = sorted({p for lst in eff.values() for p in lst})
     urls = {role: eff[svc][0] for svc, (_v, _d, role) in _ROLE.items() if svc in eff}
     return {"port_env": port_env, "ports": ports, "urls": urls}
@@ -164,19 +187,9 @@ _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
 def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Resolve a requested version. 'latest'/None -> newest stable release tag.
-
-    Returns (version, error). Uses `git ls-remote --tags` against the APIM repo so
-    it tracks real releases without cloning or GitHub API auth.
-    """
+    """Resolve a requested version. 'latest'/None -> newest stable release tag."""
     if version and version.lower() != "latest":
-        v = version.lstrip("v")
-        if not _SEMVER.match(v):
-            # allow rolling tags like '4' or '4.12' too, but warn via no-match is harsh;
-            # accept anything non-empty and let docker pull surface a bad tag.
-            return v, None
-        return v, None
-
+        return version.lstrip("v"), None
     try:
         p = subprocess.run(
             ["git", "ls-remote", "--tags", "--refs", APIM_REPO],
@@ -186,10 +199,8 @@ def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str
         return None, f"could not resolve latest version ({e}); pass an explicit version."
     if p.returncode != 0:
         return None, f"git ls-remote failed: {p.stderr.strip()[:200]}; pass an explicit version."
-
     versions = []
     for line in p.stdout.splitlines():
-        # <sha>\trefs/tags/<tag>
         tag = line.rsplit("/", 1)[-1].strip()
         m = _SEMVER.match(tag)
         if m:
@@ -199,11 +210,11 @@ def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str
     return max(versions)[1], None
 
 
-# ── docker compose introspection (APIM project) ───────────────────────────────
-def compose_ps() -> list[dict]:
+# ── docker compose introspection ──────────────────────────────────────────────
+def compose_ps(variant: str = "default") -> list[dict]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(), "ps", "--all", "--format", "json"],
-        cwd=str(apim_state_dir()), env=_env("latest"),
+        ["docker", "compose", *compose_args(variant=variant), "ps", "--all", "--format", "json"],
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0 or not p.stdout.strip():
@@ -224,19 +235,19 @@ def compose_ps() -> list[dict]:
     return rows
 
 
-def compose_logs(service: str, lines: int) -> subprocess.CompletedProcess:
+def compose_logs(service: str, lines: int, variant: str = "default") -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", *compose_args(), "logs", "--no-color",
+        ["docker", "compose", *compose_args(variant=variant), "logs", "--no-color",
          f"--tail={lines}", service],
-        cwd=str(apim_state_dir()), env=_env("latest"),
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
         capture_output=True, text=True, timeout=60,
     )
 
 
-def service_names() -> list[str]:
+def service_names(variant: str = "default") -> list[str]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(), "config", "--services"],
-        cwd=str(apim_state_dir()), env=_env("latest"),
+        ["docker", "compose", *compose_args(variant=variant), "config", "--services"],
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -246,7 +257,6 @@ def service_names() -> list[str]:
 
 # ── port-conflict detection across ALL compose projects ───────────────────────
 def project_holding_port(port: int) -> Optional[dict]:
-    """Which container/compose-project (if any) publishes this host port."""
     ids = subprocess.run(
         ["docker", "ps", "-q", "--filter", f"publish={port}"],
         capture_output=True, text=True, timeout=15,
@@ -255,8 +265,7 @@ def project_holding_port(port: int) -> Optional[dict]:
         insp = subprocess.run(
             ["docker", "inspect", "--format",
              '{{.Name}}\t{{index .Config.Labels "com.docker.compose.project"}}\t'
-             '{{index .Config.Labels "com.docker.compose.project.working_dir"}}',
-             cid],
+             '{{index .Config.Labels "com.docker.compose.project.working_dir"}}', cid],
             capture_output=True, text=True, timeout=15,
         )
         parts = insp.stdout.strip().split("\t")
@@ -267,9 +276,9 @@ def project_holding_port(port: int) -> Optional[dict]:
     return None
 
 
-def detect_conflicts(ports: list[int]) -> list[dict]:
-    """Conflicts on the given ports held by projects OTHER than the APIM project itself."""
-    proj = project_name()
+def detect_conflicts(ports: list[int], variant: str = "default") -> list[dict]:
+    """Conflicts on the given ports held by projects OTHER than this APIM project."""
+    proj = project_name(variant)
     conflicts = []
     for port in ports:
         holder = project_holding_port(port)
@@ -290,14 +299,11 @@ def down_project(project: str) -> dict:
 
 # ── up / down lifecycle ───────────────────────────────────────────────────────
 def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dict,
-                         license_path: Optional[str], log_path: Path) -> subprocess.Popen:
-    files = " ".join(compose_args(license_path))
+                         license_path: Optional[str], log_path: Path,
+                         variant: str = "default") -> subprocess.Popen:
+    files = " ".join(compose_args(license_path, variant))
     up = f"docker compose {files} up -d" + (" --force-recreate" if recreate else "")
     cmd = (f"docker compose {files} pull && {up}") if pull else up
-
-    extra = dict(port_env or {})
-    if license_path:
-        extra["APIM_LICENSE"] = license_path
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(log_path, "wb")
@@ -305,7 +311,7 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
         proc = subprocess.Popen(
             ["bash", "-c", cmd],
             cwd=str(apim_state_dir()),
-            env=_env(version, extra),
+            env=_env(version, port_env, variant, license_path),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -314,11 +320,11 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     return proc
 
 
-def run_down(timeout: int) -> dict:
+def run_down(timeout: int, variant: str = "default") -> dict:
     try:
         p = subprocess.run(
-            ["docker", "compose", *compose_args(), "down"],
-            cwd=str(apim_state_dir()), env=_env("latest"),
+            ["docker", "compose", *compose_args(variant=variant), "down"],
+            cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
             capture_output=True, text=True, timeout=timeout,
         )
         return {"timed_out": False, "returncode": p.returncode,
@@ -329,18 +335,19 @@ def run_down(timeout: int) -> dict:
                 "stderr": e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")}
 
 
-# ── tracked up-process state (mirrors state.py, APIM-scoped) ───────────────────
+# ── tracked up-process state ───────────────────────────────────────────────────
 @dataclass
 class ApimUp:
     pid: int
     log_path: str
     version: str
+    variant: str = "default"
     coexist: bool = False
     offset: int = 0
     license: Optional[str] = None
-    urls: Optional[dict] = None       # role -> host port (resolved from the compose)
-    ports: Optional[list] = None      # effective published host ports
-    compose: Optional[str] = None     # compose file used
+    urls: Optional[dict] = None
+    ports: Optional[list] = None
+    compose: Optional[str] = None
     started: Optional[str] = None
     exit_code: Optional[int] = None
 
@@ -349,15 +356,15 @@ _proc: Optional[subprocess.Popen] = None
 _rec: Optional[ApimUp] = None
 
 
-def record_up(proc: subprocess.Popen, version: str, coexist: bool, offset: int,
+def record_up(proc: subprocess.Popen, version: str, variant: str, coexist: bool, offset: int,
               license_path: Optional[str], urls: Optional[dict], ports: Optional[list],
               log_path: Path, started: Optional[str]) -> ApimUp:
     global _proc, _rec
     _proc = proc
-    _rec = ApimUp(pid=proc.pid, log_path=str(log_path), version=version,
+    _rec = ApimUp(pid=proc.pid, log_path=str(log_path), version=version, variant=variant,
                   coexist=coexist, offset=(offset if coexist else 0),
                   license=license_path, urls=urls, ports=ports,
-                  compose=str(compose_file()), started=started)
+                  compose=str(compose_file(variant)), started=started)
     _meta_path().write_text(json.dumps(asdict(_rec), indent=2))
     return _rec
 
@@ -384,9 +391,9 @@ def up_process_status() -> dict:
     rec = _rec or _load()
     if rec is None:
         return {"tracked": False}
-    common = {"pid": rec.pid, "version": rec.version, "coexist": rec.coexist,
-              "offset": rec.offset, "license": rec.license, "urls": rec.urls,
-              "ports": rec.ports, "compose": rec.compose,
+    common = {"pid": rec.pid, "version": rec.version, "variant": rec.variant,
+              "coexist": rec.coexist, "offset": rec.offset, "license": rec.license,
+              "urls": rec.urls, "ports": rec.ports, "compose": rec.compose,
               "log_path": rec.log_path, "started": rec.started}
     if _proc is not None:
         code = _proc.poll()
@@ -411,8 +418,12 @@ def current_version() -> Optional[str]:
     return rec.version if rec else None
 
 
+def current_variant() -> str:
+    rec = _rec or _load()
+    return (rec.variant if rec else None) or "default"
+
+
 def current_mode() -> dict:
-    """Last up's coexist/offset (for URL/port reporting when no up-process handle)."""
     rec = _rec or _load()
     if rec is None:
         return {"coexist": False, "offset": 0}

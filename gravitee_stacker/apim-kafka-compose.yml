@@ -1,0 +1,198 @@
+# APIM stack with the native-Kafka gateway, managed by gravitee-stacker.
+# Vendored from Gravitee's official docker/quick-setup/native-kafka quickstart
+# (do-not-hand-roll: TLS *.kafka.local certs, KRaft broker, network aliases), with
+# the automation gotchas designed out:
+#   * No `container_name: gio_apim_*` -> auto per-project names (no global collisions).
+#   * Added a kafka healthcheck + dropped kafka-ui (the broken healthcheck-dep abort).
+#   * restart policies on kafka/kafka-client (survive a Docker/VM restart).
+#   * Dropped kibana/mailhog/kafka-ui (footprint + memory).
+#   * No host log bind-mounts (logs via apim_logs); certs/config mounted by absolute
+#     path (KAFKA_* env), so no fragile ./ or file-vs-directory trap.
+# Requires an EE license with the Kafka Gateway feature (mounted read-only); without
+# it the gateway refuses to bind the :9092 Kafka listener.
+name: gravitee-apim-kafka
+
+networks:
+  storage:
+  frontend:
+  kafka:
+  gateway:
+
+volumes:
+  apim-kafka-mongo-data:
+  apim-kafka-es-data:
+  apim-kafka-broker-data:
+
+services:
+  apim-mongodb:
+    image: mongo:${MONGODB_VERSION:-6.0}
+    restart: always
+    volumes:
+      - apim-kafka-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1 || mongo --quiet --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [storage]
+
+  apim-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-8.8.1}
+    restart: always
+    environment:
+      - http.host=0.0.0.0
+      - transport.host=0.0.0.0
+      - xpack.security.enabled=false
+      - cluster.name=elasticsearch
+      - bootstrap.memory_lock=true
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: 65536
+    volumes:
+      - apim-kafka-es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [storage]
+
+  apim-gateway:
+    image: graviteeio/apim-gateway:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "${APIM_GATEWAY_PORT:-8082}:8082"
+      - "${APIM_KAFKA_PORT:-9092}:9092"
+    depends_on:
+      apim-mongodb: { condition: service_healthy }
+      apim-elasticsearch: { condition: service_healthy }
+    volumes:
+      - ${APIM_LICENSE}:/opt/graviteeio-gateway/license/license.key:ro
+      - ${KAFKA_SSL_DIR}:/opt/graviteeio-gateway/ssl
+    environment:
+      - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_ratelimit_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_reporters_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_kafka_enabled=true
+      - gravitee_kafka_ssl_keystore_password=gravitee
+      - gravitee_kafka_ssl_keystore_path=$${gravitee.home}/ssl/server.keystore.jks
+      - gravitee_kafka_ssl_keystore_type=jks
+      - gravitee_kafka_routingHostMode_defaultDomain=kafka.local
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8082/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    networks:
+      storage:
+      frontend:
+      kafka:
+      gateway:
+        aliases:
+          - foo.kafka.local
+          - broker-0-foo.kafka.local
+          - bar.kafka.local
+          - broker-0-bar.kafka.local
+
+  apim-management-api:
+    image: graviteeio/apim-management-api:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "${APIM_MGMT_PORT:-8083}:8083"
+    depends_on:
+      apim-mongodb: { condition: service_healthy }
+      apim-elasticsearch: { condition: service_healthy }
+    volumes:
+      - ${APIM_LICENSE}:/opt/graviteeio-management-api/license/license.key:ro
+    environment:
+      - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_analytics_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_installation_standalone_console_url=http://localhost:${APIM_CONSOLE_PORT:-8084}
+      - gravitee_installation_standalone_portal_url=http://localhost:${APIM_PORTAL_PORT:-8085}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/management/v2/ui/bootstrap >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    networks: [storage, frontend]
+
+  apim-console:
+    image: graviteeio/apim-management-ui:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "${APIM_CONSOLE_PORT:-8084}:8080"
+    depends_on: [apim-management-api]
+    environment:
+      - MGMT_API_URL=http://localhost:${APIM_MGMT_PORT:-8083}/management/
+      - DEFAULT_PORTAL=http://localhost:${APIM_PORTAL_PORT:-8085}
+    networks: [frontend]
+
+  apim-portal:
+    image: graviteeio/apim-portal-ui:${APIM_VERSION:-latest}
+    restart: always
+    ports:
+      - "${APIM_PORTAL_PORT:-8085}:8080"
+    depends_on: [apim-management-api]
+    environment:
+      - PORTAL_API_URL=http://localhost:${APIM_MGMT_PORT:-8083}/portal/environments/DEFAULT
+    networks: [frontend]
+
+  kafka-init:
+    image: apache/kafka:${KAFKA_IMAGE_VERSION:-3.9.1}
+    volumes:
+      - apim-kafka-broker-data:/var/lib/kafka/data
+      - ${KAFKA_SERVER_PROPS}:/opt/kafka/config/kraft/server.properties
+    command: >
+      bash -c "
+      if [ ! -f /var/lib/kafka/data/meta.properties ]; then
+        echo 'Formatting Kafka storage...';
+        /opt/kafka/bin/kafka-storage.sh format -t my-static-cluster-id -c /opt/kafka/config/kraft/server.properties;
+      else
+        echo 'Kafka storage already formatted.';
+      fi
+      "
+    networks: [kafka]
+
+  kafka:
+    image: apache/kafka:${KAFKA_IMAGE_VERSION:-3.9.1}
+    hostname: kafka
+    restart: unless-stopped
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+    ports:
+      - "9091:9091"
+      - "9093:9093"
+      - "9094:9094"
+      - "9095:9095"
+      - "9096:9096"
+    volumes:
+      - ${KAFKA_SERVER_PROPS}:/opt/kafka/config/kraft/server.properties
+      - ${KAFKA_SSL_DIR}:/etc/kafka/secrets
+      - apim-kafka-broker-data:/var/lib/kafka/data
+    environment:
+      SSL_KEYSTORE_PASSWORD: gravitee
+      SSL_KEY_PASSWORD: gravitee
+      SSL_TRUSTSTORE_PASSWORD: gravitee
+      KAFKA_OPTS: >
+        -Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf
+    command: >
+      /opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9091 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    networks: [kafka]
+
+  kafka-client:
+    image: apache/kafka:${KAFKA_IMAGE_VERSION:-3.9.1}
+    restart: unless-stopped
+    depends_on: [apim-gateway]
+    volumes:
+      - ${KAFKA_CLIENT_CONFIG_DIR}:/app/config
+      - ${KAFKA_SSL_DIR}:/app/.ssl
+    entrypoint: ["tail", "-f", "/dev/null"]
+    working_dir: /app
+    networks: [gateway]

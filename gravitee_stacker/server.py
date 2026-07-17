@@ -384,8 +384,9 @@ def _apim_urls(role_ports: dict) -> dict:
 
 def _apim_summarize() -> dict:
     up = apim.up_process_status()
-    rows = apim.compose_ps()
-    expected = apim.service_names()
+    variant = up.get("variant") or apim.current_variant()
+    rows = apim.compose_ps(variant)
+    expected = apim.service_names(variant)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -418,12 +419,13 @@ def _apim_summarize() -> dict:
     role_ports = up.get("urls")
     if not role_ports:
         try:
-            role_ports = apim.plan_ports(mode["coexist"], mode["offset"])["urls"]
+            role_ports = apim.plan_ports(mode["coexist"], mode["offset"], variant)["urls"]
         except (RuntimeError, ValueError):
             role_ports = {}
     return {
         "overall": overall,
         "version": up.get("version") or apim.current_version(),
+        "variant": variant,
         "mode": "coexist" if mode["coexist"] else "canonical",
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
@@ -437,36 +439,41 @@ def _apim_summarize() -> dict:
 
 
 @mcp.tool()
-def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
-            down_conflicting: bool = False, recreate: bool = False,
+def apim_up(version: str = "latest", variant: str = "default", pull: bool = True,
+            coexist: bool = False, down_conflicting: bool = False, recreate: bool = False,
             license: str = "") -> dict:
     """Stand up a standalone Gravitee APIM stack (background, non-blocking).
 
-    Self-contained stack (mongo + elasticsearch + gateway + management-api + console
-    + portal). Pulls the pinned image version and `docker compose up -d`, returning
-    immediately; poll `apim_status`.
+    Variants:
+      * "default" (OSS): mongo + es + gateway + management-api + console + portal on
+        8082/8083/8084/8085.
+      * "kafka": the native-Kafka gateway stack (adds a KRaft broker + kafka-client;
+        gateway also binds a Kafka listener on :9092 TLS). REQUIRES an EE license with
+        the Kafka feature (else the gateway won't bind the Kafka listener). Runs on
+        default ports; coexist is not supported for this variant yet.
 
-    Ports: default (coexist=False) uses canonical 8082/8083/8084/8085. It checks
-    those first; if another compose project holds any of them (e.g. the Gamma
-    stack), it does NOT start — it returns status "port_conflict" and suggests
-    EITHER down_conflicting=true (down the other stack first, data preserved) OR
-    coexist=true. In coexist mode every host port is shifted by APIM_PORT_OFFSET
-    (default 20000) — and the console/portal are told about the remapped management
-    port — so APIM runs cleanly alongside another stack.
+    Pulls the pinned image version and `docker compose up -d`, returning immediately;
+    poll `apim_status`. On a port conflict it does NOT start — returns "port_conflict"
+    suggesting down_conflicting=true or (default variant) coexist=true.
 
     Args:
-        version: Image tag to pin. "latest" (default) resolves the newest stable
-            release from the APIM repo (e.g. 4.12.8). Pass e.g. "4.12.3" to pin.
+        version: Image tag to pin. "latest" (default) resolves the newest stable APIM
+            release. For the kafka variant, pin a Kafka-tested tag (e.g. "4.11.12").
+        variant: "default" or "kafka".
         pull: Pull images before up (default).
-        coexist: Run on remapped ports (offset APIM_PORT_OFFSET) alongside another stack.
-        down_conflicting: (canonical only) down conflicting projects first (no -v; data kept).
-        recreate: `up -d --force-recreate` — reload/recreate (e.g. after a version change).
-        license: Path to a Gravitee license.key to mount (enterprise features). Empty =
-            resolve from APIM_LICENSE env, else the Gamma stack's license, else OSS mode.
+        coexist: (default variant only) run on remapped ports (offset APIM_PORT_OFFSET).
+        down_conflicting: down conflicting projects first (no -v; data kept).
+        recreate: `up -d --force-recreate` — reload/recreate.
+        license: Path to a license.key. Empty = APIM_LICENSE env, else ~/.gravitee/license.key.
     """
+    if variant not in apim.VARIANTS:
+        return {"status": "blocked", "message": f"unknown variant '{variant}'; use one of {list(apim.VARIANTS)}."}
     if apim.is_up_running():
         return {"status": "already_running",
                 "message": "An APIM up-process is already running. Use apim_status."}
+    if variant == "kafka" and coexist:
+        return {"status": "blocked",
+                "message": "coexist is not supported for the kafka variant yet (default ports only)."}
 
     docker_err = runner.docker_running_error()
     if docker_err:
@@ -476,15 +483,27 @@ def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
     if err:
         return {"status": "blocked", "message": err}
 
-    offset = apim.port_offset()
     license_path, license_src = apim.resolve_license(license)
+    if apim.requires_license(variant) and not license_path:
+        return {"status": "blocked",
+                "message": ("the kafka variant needs an EE license with the Kafka Gateway "
+                            "feature — none found. Drop it at ~/.gravitee/license.key, set "
+                            "APIM_LICENSE, or pass license=/path/to/license.key.")}
+
+    warnings = []
+    mem = runner.docker_total_memory_gib()
+    if variant == "kafka" and mem is not None and mem < 15.5:
+        warnings.append(f"Docker has ~{mem:.1f} GiB; the Kafka stack wants >= 16 GiB "
+                        "(low memory causes mongo/broker stalls).")
+
+    offset = apim.port_offset()
     try:
-        plan = apim.plan_ports(coexist, offset)
+        plan = apim.plan_ports(coexist, offset, variant)
     except (RuntimeError, ValueError) as e:
         return {"status": "blocked", "message": f"could not read compose config: {e}"}
     ports, port_env, role_ports = plan["ports"], plan["port_env"], plan["urls"]
 
-    conflicts = apim.detect_conflicts(ports)
+    conflicts = apim.detect_conflicts(ports, variant)
     downed = []
     if conflicts:
         if not down_conflicting:
@@ -518,27 +537,39 @@ def apim_up(version: str = "latest", pull: bool = True, coexist: bool = False,
 
     log_path = apim.up_log_path()
     log_path.write_bytes(b"")
-    proc = apim.launch_up_background(resolved, pull, recreate, port_env, license_path, log_path)
+    proc = apim.launch_up_background(resolved, pull, recreate, port_env, license_path, log_path, variant)
     started = _now_iso()
-    apim.record_up(proc, resolved, coexist, offset, license_path, role_ports, ports, log_path, started)
+    apim.record_up(proc, resolved, variant, coexist, offset, license_path, role_ports, ports, log_path, started)
 
-    return {
+    urls = _apim_urls(role_ports)
+    result = {
         "status": "starting",
         "version": resolved,
+        "variant": variant,
         "mode": "coexist" if coexist else "canonical",
         "port_offset": offset if coexist else 0,
         "pid": proc.pid,
         "log_path": str(log_path),
-        "compose_file": str(apim.compose_file()),
+        "compose_file": str(apim.compose_file(variant)),
         "pull": pull,
         "recreate": recreate,
         "license": {"mounted": bool(license_path), "path": license_path, "source": license_src},
         "downed_conflicts": downed,
         "ports": ports,
-        "urls": _apim_urls(role_ports),
+        "urls": urls,
+        "warnings": warnings,
         "started": started,
         "next": "Poll apim_status until overall: healthy (cold pulls take several minutes).",
     }
+    if variant == "kafka":
+        kafka_port = 9092 if 9092 in ports else (ports and ports[0])
+        result["kafka"] = {
+            "bootstrap": f"foo.kafka.local:{kafka_port} (or bar.; TLS/SNI)",
+            "note": ("verify the listener bound: apim_logs('apim-gateway') and look for "
+                     "'Kafka server ready'. Configure the Kafka API in the console "
+                     "(Default Kafka Domain = kafka.local, host prefix foo, endpoint kafka:9091)."),
+        }
+    return result
 
 
 @mcp.tool()
@@ -554,7 +585,7 @@ def apim_status() -> dict:
 @mcp.tool()
 def apim_down(timeout_seconds: int = 180) -> dict:
     """Stop the standalone APIM stack (`docker compose down`, volumes preserved)."""
-    result = apim.run_down(timeout_seconds)
+    result = apim.run_down(timeout_seconds, apim.current_variant())
     apim.forget_up()
     if result["timed_out"]:
         return {"status": "timeout", "message": f"down exceeded {timeout_seconds}s.",
@@ -568,11 +599,12 @@ def apim_down(timeout_seconds: int = 180) -> dict:
 @mcp.tool()
 def apim_logs(service: str, lines: int = 100) -> dict:
     """Tail logs for one APIM service (`docker compose logs --tail=<lines> <service>`)."""
-    valid = apim.service_names()
+    variant = apim.current_variant()
+    valid = apim.service_names(variant)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = apim.compose_logs(service, lines)
+    p = apim.compose_logs(service, lines, variant)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service,
             "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
 
