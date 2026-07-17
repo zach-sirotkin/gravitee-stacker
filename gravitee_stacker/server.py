@@ -562,14 +562,50 @@ def apim_up(version: str = "latest", variant: str = "default", pull: bool = True
         "next": "Poll apim_status until overall: healthy (cold pulls take several minutes).",
     }
     if variant == "kafka":
-        kafka_port = 9092 if 9092 in ports else (ports and ports[0])
-        result["kafka"] = {
-            "bootstrap": f"foo.kafka.local:{kafka_port} (or bar.; TLS/SNI)",
-            "note": ("verify the listener bound: apim_logs('apim-gateway') and look for "
-                     "'Kafka server ready'. Configure the Kafka API in the console "
-                     "(Default Kafka Domain = kafka.local, host prefix foo, endpoint kafka:9091)."),
-        }
+        result["kafka"] = _kafka_demo(apim.project_name("kafka"), role_ports)
     return result
+
+
+def _kafka_demo(project: str, role_ports: dict) -> dict:
+    """Ready-to-run guidance for the Kafka variant (accurate container names)."""
+    client = f"{project}-kafka-client-1"
+    broker = f"{project}-kafka-1"
+    console = role_ports.get("console", 8084)
+    return {
+        "bootstrap": "foo.kafka.local:9092 (or bar.; TLS/SNI)",
+        "verify_listener": "apim_logs('apim-gateway') → 'Kafka server ready to accept connections on port 9092'",
+        "one_time_console_setup": [
+            f"Open http://localhost:{console} (admin/admin). This config lives in Mongo, so do it once per fresh build.",
+            "Organization → Entrypoints & Sharding Tags → Entrypoint Configuration → "
+            "Default Kafka Bootstrap Domain Pattern = {apiHost}.kafka.local  "
+            "(the field defaults to just {apiHost} — the .kafka.local suffix MUST be appended so "
+            "SNI/DNS line up with the *.kafka.local cert + foo.kafka.local alias). Default Kafka port = 9092.",
+            "Create a Kafka API: Protocol Kafka, host prefix 'foo', endpoint PLAINTEXT to kafka:9091, "
+            "Keyless plan, Save & Deploy.",
+        ],
+        "commands": {
+            # single-line (zsh breaks on multi-line pastes with # comments or \ continuations)
+            "produce": (f"docker exec -it {client} bash -c \"/opt/kafka/bin/kafka-console-producer.sh "
+                        "--bootstrap-server foo.kafka.local:9092 "
+                        "--producer.config /app/config/kafka-keyless-plan-ssl.properties --topic client-topic-1\""),
+            "consume_via_gateway": (f"docker exec -it {client} bash -c \"/opt/kafka/bin/kafka-console-consumer.sh "
+                        "--bootstrap-server foo.kafka.local:9092 "
+                        "--consumer.config /app/config/kafka-keyless-plan-ssl.properties --topic client-topic-1 "
+                        "--from-beginning --group demo-grp --timeout-ms 20000\""),
+            "verify_broker_direct": (f"docker exec {broker} /opt/kafka/bin/kafka-console-consumer.sh "
+                        "--bootstrap-server localhost:9091 --topic client-topic-1 "
+                        "--partition 0 --offset earliest --timeout-ms 15000"),
+        },
+        "notes": [
+            "First produce to a new topic logs a one-time UNKNOWN_TOPIC_OR_PARTITION warning — benign "
+            "(auto.create.topics.enable=true).",
+            "Consumer-group reads now work: the broker sets offsets.topic.replication.factor=1 (single-broker), "
+            "so __consumer_offsets is created and group coordination succeeds. For a coordination-free sanity "
+            "check use verify_broker_direct (--partition 0 --offset earliest).",
+            "kafka + kafka-client have restart: unless-stopped, so they survive a Docker/VM restart; after an "
+            "explicit apim_down they're removed — apim_up(variant='kafka') to bring them back.",
+        ],
+    }
 
 
 @mcp.tool()

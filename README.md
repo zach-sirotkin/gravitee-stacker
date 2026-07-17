@@ -133,10 +133,23 @@ policies, trimmed kibana/mailhog/kafka-ui, no fragile host mounts). **Requires a
 license with the Kafka feature** (blocks otherwise — the gateway won't bind :9092
 without it). Pin a Kafka-tested version (e.g. `version="4.11.12"`). Runs on default
 ports; coexist isn't supported for this variant yet. After healthy, verify with
-`apim_logs("apim-gateway")` → `Kafka server ready to accept connections on port 9092`,
-then in the console set **Default Kafka Domain = `kafka.local`** and create a Kafka API
-(host prefix `foo`, endpoint `kafka:9091`); clients bootstrap at `foo.kafka.local:9092`.
-Wants Docker >= 16 GiB.
+`apim_logs("apim-gateway")` for `Kafka server ready to accept connections on port 9092`.
+
+One-time console config (per fresh build — it lives in Mongo, not the files): at the
+console (admin/admin), Organization → Entrypoints & Sharding Tags → **Default Kafka
+Bootstrap Domain Pattern = `{apiHost}.kafka.local`** (the field defaults to just
+`{apiHost}` — the `.kafka.local` suffix must be appended so SNI/DNS match the
+`*.kafka.local` cert and `foo.kafka.local` alias), then create a Kafka API (Protocol
+Kafka, host prefix `foo`, endpoint `kafka:9091`, Keyless). Clients bootstrap at
+`foo.kafka.local:9092`. `apim_up`'s return payload includes ready-to-run single-line
+produce/consume commands with this project's exact container names.
+
+Consumer-group reads work out of the box: the vendored broker config pins
+`offsets.topic.replication.factor=1` (+ the transaction-state topics), so
+`__consumer_offsets` is creatable on the single broker — without it, group reads
+(incl. consume-through-gateway) time out at 0 messages while partition-direct reads
+work. For a coordination-free sanity check, read the broker directly with
+`--partition 0 --offset earliest`. Wants Docker >= 16 GiB.
 
 ### The background-process design (the important part)
 
