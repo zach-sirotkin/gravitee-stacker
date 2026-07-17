@@ -1,15 +1,15 @@
 """Standalone Gravitee APIM stack management (separate from the Gamma stack).
 
-Ships self-contained composes pinned by ``APIM_VERSION``:
-  * variant "default" — apim-compose.yml (project gravitee-apim): OSS mongo + es +
-    gateway + management-api + console + portal.
-  * variant "kafka"   — apim-kafka-compose.yml (project gravitee-apim-kafka): the
-    native-Kafka gateway stack (adds a KRaft broker + kafka-client; requires an EE
-    license with the Kafka feature). Vendored from Gravitee's official native-kafka
-    quickstart with the automation gotchas designed out.
+Supports named INSTANCES so multiple APIM stacks run at once (generalized coexist):
+each instance gets its own compose project (via `docker compose -p`), its own data
+volumes, an auto-allocated host-port band, and its own tracked up-record. Instance
+"default" keeps the canonical ports/project (backward compatible); named instances
+land on a shifted band.
 
-Provides: resolve the latest release, detect host-port conflicts, and bring the
-stack up/down (non-blocking background pattern).
+Variants:
+  * "default" — apim-compose.yml (OSS mongo+es+gateway+mgmt-api+console+portal).
+  * "kafka"   — apim-kafka-compose.yml (native-Kafka gateway; EE license required;
+    single-instance / fixed ports).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,10 +29,10 @@ _HERE = Path(__file__).resolve().parent
 APIM_COMPOSE = _HERE / "apim-compose.yml"
 APIM_LICENSE_COMPOSE = _HERE / "apim-license.yml"
 APIM_KAFKA_COMPOSE = _HERE / "apim-kafka-compose.yml"
-KAFKA_DIR = _HERE / "kafka"  # vendored certs/config/client-config
-APIM_PROJECT = "gravitee-apim"  # fallback; real name is read from the compose `name:`
+KAFKA_DIR = _HERE / "kafka"
 APIM_REPO = "https://github.com/gravitee-io/gravitee-api-management.git"
 DEFAULT_PORT_OFFSET = 20000
+MAX_OFFSET = 40000  # 8085+40000=48085 stays a valid port; up to 3 concurrent instances
 
 VARIANTS = ("default", "kafka")
 
@@ -45,27 +46,40 @@ _ROLE = {
 
 
 def requires_license(variant: str) -> bool:
-    """The Kafka gateway won't bind its :9092 listener without an EE Kafka license."""
     return variant == "kafka"
 
 
-# ── paths / env ───────────────────────────────────────────────────────────────
+def supports_instances(variant: str) -> bool:
+    """The kafka variant is single-instance (fixed *.kafka.local cert + broker ports)."""
+    return variant != "kafka"
+
+
+# ── paths / project / env ─────────────────────────────────────────────────────
 def apim_state_dir() -> Path:
     d = runner.state_dir() / "apim"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def up_log_path() -> Path:
-    return apim_state_dir() / "up.log"
+def _base_project(variant: str) -> str:
+    return "gravitee-apim-kafka" if variant == "kafka" else "gravitee-apim"
 
 
-def _meta_path() -> Path:
-    return apim_state_dir() / "up.json"
+def project_for(variant: str = "default", instance: str = "default") -> str:
+    base = _base_project(variant)
+    return base if instance == "default" else f"{base}-{instance}"
+
+
+def up_log_path(instance: str = "default") -> Path:
+    return apim_state_dir() / ("up.log" if instance == "default" else f"up-{instance}.log")
+
+
+def _meta_path(instance: str = "default") -> Path:
+    # "default" keeps the historical up.json name (backward compatible).
+    return apim_state_dir() / ("up.json" if instance == "default" else f"{instance}.json")
 
 
 def compose_file(variant: str = "default") -> Path:
-    """The compose to use for the variant. For "default", APIM_COMPOSE_FILE overrides."""
     if variant == "kafka":
         return APIM_KAFKA_COMPOSE
     override = os.environ.get("APIM_COMPOSE_FILE", "").strip()
@@ -76,9 +90,9 @@ def compose_file(variant: str = "default") -> Path:
     return APIM_COMPOSE
 
 
-def compose_args(license_path: Optional[str] = None, variant: str = "default") -> list[str]:
-    args = ["-f", str(compose_file(variant))]
-    # The kafka compose mounts the license directly; only "default" uses the overlay.
+def compose_args(variant: str = "default", instance: str = "default",
+                 license_path: Optional[str] = None) -> list[str]:
+    args = ["-p", project_for(variant, instance), "-f", str(compose_file(variant))]
     if variant == "default" and license_path:
         args += ["-f", str(APIM_LICENSE_COMPOSE)]
     return args
@@ -91,16 +105,10 @@ def port_offset() -> int:
         return DEFAULT_PORT_OFFSET
 
 
-# The conventional place to drop a license so `apim_up` finds it with no arg/env.
 DEFAULT_LICENSE_PATH = Path.home() / ".gravitee" / "license.key"
 
 
 def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
-    """Resolve the license file path. Returns (abs_path_or_None, source).
-
-    Order: explicit arg -> APIM_LICENSE env -> ~/.gravitee/license.key -> none.
-    A candidate is used only if it's a real, non-empty file.
-    """
     candidates = [
         (license_arg, "argument"),
         (os.environ.get("APIM_LICENSE", ""), "APIM_LICENSE env"),
@@ -120,12 +128,9 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
     env = runner._child_env()
     env["APIM_VERSION"] = version
     if variant == "kafka":
-        # Absolute paths to the vendored assets the kafka compose bind-mounts.
         env["KAFKA_SSL_DIR"] = str(KAFKA_DIR / "ssl")
         env["KAFKA_SERVER_PROPS"] = str(KAFKA_DIR / "config" / "server.properties")
         env["KAFKA_CLIENT_CONFIG_DIR"] = str(KAFKA_DIR / "client-config")
-        # ${APIM_LICENSE} must render so `docker compose config/ps/down` can parse the
-        # mount; real license at up-time, a harmless existing file otherwise.
         env["APIM_LICENSE"] = license_path or str(KAFKA_DIR / "ssl" / "kafka_server_jaas.conf")
     if license_path:
         env["APIM_LICENSE"] = license_path
@@ -134,10 +139,11 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
     return env
 
 
-# ── config-driven port/URL resolution (follows the actual compose file) ────────
-def _config(extra_env: Optional[dict] = None, variant: str = "default") -> dict:
+# ── config-driven port/URL resolution ─────────────────────────────────────────
+def _config(extra_env: Optional[dict] = None, variant: str = "default",
+            instance: str = "default") -> dict:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(variant=variant), "config", "--format", "json"],
+        ["docker", "compose", *compose_args(variant, instance), "config", "--format", "json"],
         cwd=str(apim_state_dir()), env=_env("latest", extra_env, variant),
         capture_output=True, text=True, timeout=30,
     )
@@ -155,31 +161,47 @@ def _service_ports(cfg: dict) -> dict:
     return out
 
 
-def project_name(variant: str = "default") -> str:
-    """The compose project name (from the file's `name:`), for conflict exclusion."""
-    fallback = "gravitee-apim-kafka" if variant == "kafka" else APIM_PROJECT
-    try:
-        return _config(variant=variant).get("name") or fallback
-    except (RuntimeError, ValueError):
-        return fallback
+def project_name(variant: str = "default", instance: str = "default") -> str:
+    """The effective compose project name (with -p it's deterministic)."""
+    return project_for(variant, instance)
 
 
-def plan_ports(coexist: bool, offset: int, variant: str = "default") -> dict:
-    """Resolve effective published ports + URLs by reading the ACTUAL compose.
+def plan_ports(offset: int, variant: str = "default") -> dict:
+    """Effective published ports + URLs for the given host-port `offset` (0 = canonical).
 
-    Returns {port_env, ports, urls}. In coexist mode each known service's canonical
-    port (from the file) is shifted by `offset` via the APIM_*_PORT env vars.
+    Ports don't depend on the instance (only the offset), so this is instance-free.
     """
     base = _service_ports(_config(variant=variant))
     port_env = {}
-    if coexist:
+    if offset:
         for svc, (var, default, _role) in _ROLE.items():
-            canon = base.get(svc, [default])[0]
-            port_env[var] = str(canon + offset)
+            port_env[var] = str(base.get(svc, [default])[0] + offset)
     eff = _service_ports(_config(port_env, variant))
     ports = sorted({p for lst in eff.values() for p in lst})
     urls = {role: eff[svc][0] for svc, (_v, _d, role) in _ROLE.items() if svc in eff}
     return {"port_env": port_env, "ports": ports, "urls": urls}
+
+
+def allocate_offset(variant: str, instance: str) -> Optional[int]:
+    """Pick a host-port band for this instance. A re-up keeps the instance's existing
+    band; default -> 0 (canonical); named -> lowest offset whose ports are free AND
+    not already claimed by another tracked instance (avoids a start-up race)."""
+    existing = _rec_for(instance)
+    if existing is not None:
+        return existing.offset
+    if instance == "default":
+        return 0
+    claimed = {r.offset for i in known_instances() if (r := _rec_for(i))}
+    for off in range(DEFAULT_PORT_OFFSET, MAX_OFFSET + 1, DEFAULT_PORT_OFFSET):
+        if off in claimed:
+            continue
+        try:
+            ports = plan_ports(off, variant)["ports"]
+        except (RuntimeError, ValueError):
+            return None
+        if not runner.ports_in_use(ports):
+            return off
+    return None
 
 
 # ── version resolution ────────────────────────────────────────────────────────
@@ -187,14 +209,11 @@ _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
 def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Resolve a requested version. 'latest'/None -> newest stable release tag."""
     if version and version.lower() != "latest":
         return version.lstrip("v"), None
     try:
-        p = subprocess.run(
-            ["git", "ls-remote", "--tags", "--refs", APIM_REPO],
-            capture_output=True, text=True, timeout=30,
-        )
+        p = subprocess.run(["git", "ls-remote", "--tags", "--refs", APIM_REPO],
+                           capture_output=True, text=True, timeout=30)
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return None, f"could not resolve latest version ({e}); pass an explicit version."
     if p.returncode != 0:
@@ -211,9 +230,9 @@ def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str
 
 
 # ── docker compose introspection ──────────────────────────────────────────────
-def compose_ps(variant: str = "default") -> list[dict]:
+def compose_ps(variant: str = "default", instance: str = "default") -> list[dict]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(variant=variant), "ps", "--all", "--format", "json"],
+        ["docker", "compose", *compose_args(variant, instance), "ps", "--all", "--format", "json"],
         cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
         capture_output=True, text=True, timeout=30,
     )
@@ -235,18 +254,19 @@ def compose_ps(variant: str = "default") -> list[dict]:
     return rows
 
 
-def compose_logs(service: str, lines: int, variant: str = "default") -> subprocess.CompletedProcess:
+def compose_logs(service: str, lines: int, variant: str = "default",
+                 instance: str = "default") -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", *compose_args(variant=variant), "logs", "--no-color",
+        ["docker", "compose", *compose_args(variant, instance), "logs", "--no-color",
          f"--tail={lines}", service],
         cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
         capture_output=True, text=True, timeout=60,
     )
 
 
-def service_names(variant: str = "default") -> list[str]:
+def service_names(variant: str = "default", instance: str = "default") -> list[str]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(variant=variant), "config", "--services"],
+        ["docker", "compose", *compose_args(variant, instance), "config", "--services"],
         cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
         capture_output=True, text=True, timeout=30,
     )
@@ -257,28 +277,23 @@ def service_names(variant: str = "default") -> list[str]:
 
 # ── port-conflict detection across ALL compose projects ───────────────────────
 def project_holding_port(port: int) -> Optional[dict]:
-    ids = subprocess.run(
-        ["docker", "ps", "-q", "--filter", f"publish={port}"],
-        capture_output=True, text=True, timeout=15,
-    )
+    ids = subprocess.run(["docker", "ps", "-q", "--filter", f"publish={port}"],
+                         capture_output=True, text=True, timeout=15)
     for cid in ids.stdout.split():
         insp = subprocess.run(
             ["docker", "inspect", "--format",
-             '{{.Name}}\t{{index .Config.Labels "com.docker.compose.project"}}\t'
-             '{{index .Config.Labels "com.docker.compose.project.working_dir"}}', cid],
-            capture_output=True, text=True, timeout=15,
-        )
+             '{{.Name}}\t{{index .Config.Labels "com.docker.compose.project"}}', cid],
+            capture_output=True, text=True, timeout=15)
         parts = insp.stdout.strip().split("\t")
         name = parts[0].lstrip("/") if parts else cid
         project = parts[1] if len(parts) > 1 and parts[1] else "(no compose project)"
-        workdir = parts[2] if len(parts) > 2 else ""
-        return {"port": port, "container": name, "project": project, "working_dir": workdir}
+        return {"port": port, "container": name, "project": project}
     return None
 
 
-def detect_conflicts(ports: list[int], variant: str = "default") -> list[dict]:
-    """Conflicts on the given ports held by projects OTHER than this APIM project."""
-    proj = project_name(variant)
+def detect_conflicts(ports: list[int], variant: str = "default",
+                     instance: str = "default") -> list[dict]:
+    proj = project_for(variant, instance)
     conflicts = []
     for port in ports:
         holder = project_holding_port(port)
@@ -288,11 +303,8 @@ def detect_conflicts(ports: list[int], variant: str = "default") -> list[dict]:
 
 
 def down_project(project: str) -> dict:
-    """`docker compose -p <project> down` (NO -v — data volumes preserved)."""
-    p = subprocess.run(
-        ["docker", "compose", "-p", project, "down"],
-        env=runner._child_env(), capture_output=True, text=True, timeout=180,
-    )
+    p = subprocess.run(["docker", "compose", "-p", project, "down"],
+                       env=runner._child_env(), capture_output=True, text=True, timeout=180)
     return {"project": project, "returncode": p.returncode,
             "output": (p.stdout or "") + (p.stderr or "")}
 
@@ -300,8 +312,8 @@ def down_project(project: str) -> dict:
 # ── up / down lifecycle ───────────────────────────────────────────────────────
 def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dict,
                          license_path: Optional[str], log_path: Path,
-                         variant: str = "default") -> subprocess.Popen:
-    files = " ".join(compose_args(license_path, variant))
+                         variant: str = "default", instance: str = "default") -> subprocess.Popen:
+    files = " ".join(shlex.quote(a) for a in compose_args(variant, instance, license_path))
     up = f"docker compose {files} up -d" + (" --force-recreate" if recreate else "")
     cmd = (f"docker compose {files} pull && {up}") if pull else up
 
@@ -309,8 +321,7 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     fh = open(log_path, "wb")
     try:
         proc = subprocess.Popen(
-            ["bash", "-c", cmd],
-            cwd=str(apim_state_dir()),
+            ["bash", "-c", cmd], cwd=str(apim_state_dir()),
             env=_env(version, port_env, variant, license_path),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
@@ -320,10 +331,10 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     return proc
 
 
-def run_down(timeout: int, variant: str = "default") -> dict:
+def run_down(timeout: int, variant: str = "default", instance: str = "default") -> dict:
     try:
         p = subprocess.run(
-            ["docker", "compose", *compose_args(variant=variant), "down"],
+            ["docker", "compose", *compose_args(variant, instance), "down"],
             cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
             capture_output=True, text=True, timeout=timeout,
         )
@@ -335,42 +346,44 @@ def run_down(timeout: int, variant: str = "default") -> dict:
                 "stderr": e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")}
 
 
-# ── tracked up-process state ───────────────────────────────────────────────────
+# ── tracked up-process state (per instance) ────────────────────────────────────
 @dataclass
 class ApimUp:
     pid: int
     log_path: str
     version: str
+    instance: str = "default"
     variant: str = "default"
     coexist: bool = False
     offset: int = 0
     license: Optional[str] = None
     urls: Optional[dict] = None
     ports: Optional[list] = None
+    project: Optional[str] = None
     compose: Optional[str] = None
     started: Optional[str] = None
     exit_code: Optional[int] = None
 
 
-_proc: Optional[subprocess.Popen] = None
-_rec: Optional[ApimUp] = None
+_procs: dict[str, subprocess.Popen] = {}
+_recs: dict[str, ApimUp] = {}
 
 
-def record_up(proc: subprocess.Popen, version: str, variant: str, coexist: bool, offset: int,
+def record_up(proc: subprocess.Popen, version: str, variant: str, instance: str, offset: int,
               license_path: Optional[str], urls: Optional[dict], ports: Optional[list],
               log_path: Path, started: Optional[str]) -> ApimUp:
-    global _proc, _rec
-    _proc = proc
-    _rec = ApimUp(pid=proc.pid, log_path=str(log_path), version=version, variant=variant,
-                  coexist=coexist, offset=(offset if coexist else 0),
-                  license=license_path, urls=urls, ports=ports,
-                  compose=str(compose_file(variant)), started=started)
-    _meta_path().write_text(json.dumps(asdict(_rec), indent=2))
-    return _rec
+    rec = ApimUp(pid=proc.pid, log_path=str(log_path), version=version, instance=instance,
+                 variant=variant, coexist=(offset > 0), offset=offset, license=license_path,
+                 urls=urls, ports=ports, project=project_for(variant, instance),
+                 compose=str(compose_file(variant)), started=started)
+    _procs[instance] = proc
+    _recs[instance] = rec
+    _meta_path(instance).write_text(json.dumps(asdict(rec), indent=2))
+    return rec
 
 
-def _load() -> Optional[ApimUp]:
-    p = _meta_path()
+def _load(instance: str) -> Optional[ApimUp]:
+    p = _meta_path(instance)
     if not p.is_file():
         return None
     try:
@@ -379,52 +392,63 @@ def _load() -> Optional[ApimUp]:
         return None
 
 
-def is_up_running() -> bool:
-    if _proc is not None:
-        return _proc.poll() is None
-    rec = _rec or _load()
+def _rec_for(instance: str) -> Optional[ApimUp]:
+    return _recs.get(instance) or _load(instance)
+
+
+def is_up_running(instance: str = "default") -> bool:
+    proc = _procs.get(instance)
+    if proc is not None:
+        return proc.poll() is None
+    rec = _rec_for(instance)
     return runner.pid_alive(rec.pid) if rec else False
 
 
-def up_process_status() -> dict:
-    global _rec
-    rec = _rec or _load()
+def up_process_status(instance: str = "default") -> dict:
+    rec = _rec_for(instance)
     if rec is None:
         return {"tracked": False}
-    common = {"pid": rec.pid, "version": rec.version, "variant": rec.variant,
-              "coexist": rec.coexist, "offset": rec.offset, "license": rec.license,
-              "urls": rec.urls, "ports": rec.ports, "compose": rec.compose,
+    common = {"pid": rec.pid, "version": rec.version, "instance": rec.instance,
+              "variant": rec.variant, "coexist": rec.coexist, "offset": rec.offset,
+              "license": rec.license, "urls": rec.urls, "ports": rec.ports,
+              "project": rec.project, "compose": rec.compose,
               "log_path": rec.log_path, "started": rec.started}
-    if _proc is not None:
-        code = _proc.poll()
+    proc = _procs.get(instance)
+    if proc is not None:
+        code = proc.poll()
         if code is not None and rec.exit_code != code:
             rec.exit_code = code
-            _meta_path().write_text(json.dumps(asdict(rec), indent=2))
+            _meta_path(instance).write_text(json.dumps(asdict(rec), indent=2))
         return {"tracked": True, "running": code is None, "exit_code": code, **common}
     running = runner.pid_alive(rec.pid)
     return {"tracked": True, "running": running,
             "exit_code": None if running else rec.exit_code, **common}
 
 
-def forget_up() -> None:
-    global _proc, _rec
-    _proc = None
-    _rec = None
-    _meta_path().unlink(missing_ok=True)
+def forget_up(instance: str = "default") -> None:
+    _procs.pop(instance, None)
+    _recs.pop(instance, None)
+    _meta_path(instance).unlink(missing_ok=True)
 
 
-def current_version() -> Optional[str]:
-    rec = _rec or _load()
+def current_version(instance: str = "default") -> Optional[str]:
+    rec = _rec_for(instance)
     return rec.version if rec else None
 
 
-def current_variant() -> str:
-    rec = _rec or _load()
+def current_variant(instance: str = "default") -> str:
+    rec = _rec_for(instance)
     return (rec.variant if rec else None) or "default"
 
 
-def current_mode() -> dict:
-    rec = _rec or _load()
-    if rec is None:
-        return {"coexist": False, "offset": 0}
-    return {"coexist": rec.coexist, "offset": rec.offset}
+def current_offset(instance: str = "default") -> int:
+    rec = _rec_for(instance)
+    return rec.offset if rec else 0
+
+
+def known_instances() -> list[str]:
+    """Instance names with a persisted record ('up.json' -> 'default')."""
+    names = []
+    for f in apim_state_dir().glob("*.json"):
+        names.append("default" if f.name == "up.json" else f.stem)
+    return sorted(set(names))

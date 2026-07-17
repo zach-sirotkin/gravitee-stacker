@@ -101,7 +101,33 @@ host** (one port); everything else is internal.
 overlaps nothing else (Gamma/APIM use 80–8085), it usually just runs; if the port is
 taken it reports the conflict. UIs are path-routed through nginx: console
 `http://localhost:{port}/am/ui/` (admin/adminadmin), management API `…/am/management/`,
-gateway `…/am/`. To run several AM versions at once, give each a different `port`.
+gateway `…/am/`.
+
+### Running multiple stacks at once (generalized coexist)
+
+`apim_*` and `am_*` take an **`instance`** name so you can run several stacks of the
+same kind concurrently (`stack_*` / Gamma is the exception — it's locked to canonical
+ports, single instance). Each instance gets its own compose **project**, its own data
+volumes, and an **auto-allocated host-port band** — no manual port math:
+
+- `instance="default"` → canonical ports / project `gravitee-apim` (or `gravitee-am`).
+- a named instance → project `gravitee-apim-<name>` / `gravitee-am-<name>`, ports
+  auto-shifted (APIM: +20000, +40000; AM: next free port). Allocation avoids ports
+  already bound *and* already claimed by another tracked instance (no start-up race).
+
+```
+apim_up(instance="a")            # canonical 8082–8085  (a == first/default band)
+apim_up(instance="b")            # auto → 28082–28085
+am_up(instance="a")              # → 8086 (or next free)
+am_up(instance="b")              # → 8087
+apim_list  /  am_list            # every tracked instance + its status/urls
+apim_status(instance="b")        # target a specific instance
+apim_down(instance="b")          # down just that instance (volumes preserved)
+```
+
+The **kafka** variant is single-instance (its `*.kafka.local` cert + advertised
+listeners assume fixed ports). Up to ~3 concurrent APIM instances fit before the
+port bands run out (offset cap 40000).
 
 **Versions.** `version="latest"` resolves the newest stable tag from
 `gravitee-io/gravitee-api-management` (e.g. `4.12.8`) → sets `APIM_VERSION` → pulls

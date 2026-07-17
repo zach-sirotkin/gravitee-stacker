@@ -382,11 +382,11 @@ def _apim_urls(role_ports: dict) -> dict:
     return out
 
 
-def _apim_summarize() -> dict:
-    up = apim.up_process_status()
-    variant = up.get("variant") or apim.current_variant()
-    rows = apim.compose_ps(variant)
-    expected = apim.service_names(variant)
+def _apim_summarize(instance: str = "default") -> dict:
+    up = apim.up_process_status(instance)
+    variant = up.get("variant") or apim.current_variant(instance)
+    rows = apim.compose_ps(variant, instance)
+    expected = apim.service_names(variant, instance)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -413,67 +413,69 @@ def _apim_summarize() -> dict:
     else:
         overall = "partial"
 
-    mode = apim.current_mode()
-    # URLs from the tracked up (resolved from the compose at up time); if there's no
-    # record (e.g. down), resolve canonical ports from the compose for display.
+    offset = up.get("offset") if up.get("offset") is not None else apim.current_offset(instance)
     role_ports = up.get("urls")
     if not role_ports:
         try:
-            role_ports = apim.plan_ports(mode["coexist"], mode["offset"], variant)["urls"]
+            role_ports = apim.plan_ports(offset, variant)["urls"]
         except (RuntimeError, ValueError):
             role_ports = {}
     return {
         "overall": overall,
-        "version": up.get("version") or apim.current_version(),
+        "instance": instance,
+        "version": up.get("version") or apim.current_version(instance),
         "variant": variant,
-        "mode": "coexist" if mode["coexist"] else "canonical",
+        "project": apim.project_for(variant, instance),
+        "mode": "coexist" if offset else "canonical",
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
         "urls": _apim_urls(role_ports),
-        "up_log_tail": runner.tail_file(apim.up_log_path(), 40),
+        "up_log_tail": runner.tail_file(apim.up_log_path(instance), 40),
         "checked_at": _now_iso(),
     }
 
 
 @mcp.tool()
-def apim_up(version: str = "latest", variant: str = "default", pull: bool = True,
-            coexist: bool = False, down_conflicting: bool = False, recreate: bool = False,
+def apim_up(version: str = "latest", variant: str = "default", instance: str = "default",
+            pull: bool = True, down_conflicting: bool = False, recreate: bool = False,
             license: str = "") -> dict:
     """Stand up a standalone Gravitee APIM stack (background, non-blocking).
 
     Variants:
-      * "default" (OSS): mongo + es + gateway + management-api + console + portal on
-        8082/8083/8084/8085.
+      * "default" (OSS): mongo + es + gateway + management-api + console + portal.
       * "kafka": the native-Kafka gateway stack (adds a KRaft broker + kafka-client;
-        gateway also binds a Kafka listener on :9092 TLS). REQUIRES an EE license with
-        the Kafka feature (else the gateway won't bind the Kafka listener). Runs on
-        default ports; coexist is not supported for this variant yet.
+        gateway binds a Kafka listener on :9092 TLS). REQUIRES an EE license. Single
+        instance / fixed ports.
 
-    Pulls the pinned image version and `docker compose up -d`, returning immediately;
-    poll `apim_status`. On a port conflict it does NOT start — returns "port_conflict"
-    suggesting down_conflicting=true or (default variant) coexist=true.
+    Instances (generalized coexist): pass a unique `instance` name to run MULTIPLE
+    APIM stacks at once. instance="default" uses the canonical ports/project
+    (gravitee-apim). A named instance gets its own project (gravitee-apim-<name>),
+    its own data volumes, and an auto-allocated host-port band (+20000, +40000, …).
+
+    Pulls the pinned version and `docker compose -p <project> up -d`, returning
+    immediately; poll `apim_status(instance)`. On a port conflict it does NOT start —
+    returns "port_conflict".
 
     Args:
-        version: Image tag to pin. "latest" (default) resolves the newest stable APIM
-            release. For the kafka variant, pin a Kafka-tested tag (e.g. "4.11.12").
+        version: Image tag to pin ("latest" resolves the newest stable APIM release).
         variant: "default" or "kafka".
+        instance: unique name to run several stacks at once (default "default").
         pull: Pull images before up (default).
-        coexist: (default variant only) run on remapped ports (offset APIM_PORT_OFFSET).
         down_conflicting: down conflicting projects first (no -v; data kept).
-        recreate: `up -d --force-recreate` — reload/recreate.
+        recreate: `up -d --force-recreate`.
         license: Path to a license.key. Empty = APIM_LICENSE env, else ~/.gravitee/license.key.
     """
     if variant not in apim.VARIANTS:
         return {"status": "blocked", "message": f"unknown variant '{variant}'; use one of {list(apim.VARIANTS)}."}
-    if apim.is_up_running():
-        return {"status": "already_running",
-                "message": "An APIM up-process is already running. Use apim_status."}
-    if variant == "kafka" and coexist:
+    if not apim.supports_instances(variant) and instance != "default":
         return {"status": "blocked",
-                "message": "coexist is not supported for the kafka variant yet (default ports only)."}
+                "message": f"the {variant} variant is single-instance (fixed ports); use instance='default'."}
+    if apim.is_up_running(instance):
+        return {"status": "already_running",
+                "message": f"APIM instance '{instance}' is already running. Use apim_status(instance='{instance}')."}
 
     docker_err = runner.docker_running_error()
     if docker_err:
@@ -493,40 +495,39 @@ def apim_up(version: str = "latest", variant: str = "default", pull: bool = True
     warnings = []
     mem = runner.docker_total_memory_gib()
     if variant == "kafka" and mem is not None and mem < 15.5:
-        warnings.append(f"Docker has ~{mem:.1f} GiB; the Kafka stack wants >= 16 GiB "
-                        "(low memory causes mongo/broker stalls).")
+        warnings.append(f"Docker has ~{mem:.1f} GiB; the Kafka stack wants >= 16 GiB.")
 
-    offset = apim.port_offset()
+    offset = apim.allocate_offset(variant, instance)
+    if offset is None:
+        return {"status": "blocked",
+                "message": f"no free host-port band for a new APIM instance (tried offsets up to {apim.MAX_OFFSET}). "
+                           "Down an existing instance first (apim_list to see them)."}
     try:
-        plan = apim.plan_ports(coexist, offset, variant)
+        plan = apim.plan_ports(offset, variant)
     except (RuntimeError, ValueError) as e:
         return {"status": "blocked", "message": f"could not read compose config: {e}"}
     ports, port_env, role_ports = plan["ports"], plan["port_env"], plan["urls"]
 
-    conflicts = apim.detect_conflicts(ports, variant)
+    conflicts = apim.detect_conflicts(ports, variant, instance)
     downed = []
     if conflicts:
         if not down_conflicting:
+            suggest = {"down_the_other": {"tool": "apim_up",
+                                          "args": {"version": version, "instance": instance, "down_conflicting": True}}}
+            if instance == "default":
+                suggest["run_another_instance"] = {"tool": "apim_up", "args": {"version": version, "instance": "b"}}
             return {
                 "status": "port_conflict",
-                "version": resolved,
-                "coexist": coexist,
+                "version": resolved, "instance": instance, "offset": offset,
                 "message": (
-                    f"port(s) needed by APIM ({'coexist' if coexist else 'canonical'}) "
-                    f"are held by other stack(s): {[(c['port'], c['project']) for c in conflicts]}. "
-                    "APIM was NOT started. Either re-run with down_conflicting=true to "
-                    "down the other stack(s) (data preserved)"
-                    + ("" if coexist else ", or run with coexist=true to start APIM on "
-                       f"remapped ports (shifted by {offset})") + "."
+                    f"port(s) needed by APIM instance '{instance}' are held by other stack(s): "
+                    f"{[(c['port'], c['project']) for c in conflicts]}. APIM was NOT started. "
+                    "down_conflicting=true to free them"
+                    + (", or run a named instance to coexist (e.g. instance='b')." if instance == "default" else ".")
                 ),
                 "conflicts": conflicts,
                 "conflicting_projects": sorted({c["project"] for c in conflicts}),
-                "suggest": (
-                    {"tool": "apim_up", "args": {"version": version, "down_conflicting": True}}
-                    if coexist else
-                    {"down_the_other": {"tool": "apim_up", "args": {"version": version, "down_conflicting": True}},
-                     "run_alongside": {"tool": "apim_up", "args": {"version": version, "coexist": True}}}
-                ),
+                "suggest": suggest,
             }
         gamma_project = runner.docker_dir().name
         for proj in sorted({c["project"] for c in conflicts}):
@@ -535,19 +536,21 @@ def apim_up(version: str = "latest", variant: str = "default", pull: bool = True
             if proj == gamma_project:
                 state.forget_up()
 
-    log_path = apim.up_log_path()
+    log_path = apim.up_log_path(instance)
     log_path.write_bytes(b"")
-    proc = apim.launch_up_background(resolved, pull, recreate, port_env, license_path, log_path, variant)
+    proc = apim.launch_up_background(resolved, pull, recreate, port_env, license_path,
+                                    log_path, variant, instance)
     started = _now_iso()
-    apim.record_up(proc, resolved, variant, coexist, offset, license_path, role_ports, ports, log_path, started)
+    apim.record_up(proc, resolved, variant, instance, offset, license_path, role_ports, ports, log_path, started)
 
-    urls = _apim_urls(role_ports)
     result = {
         "status": "starting",
         "version": resolved,
         "variant": variant,
-        "mode": "coexist" if coexist else "canonical",
-        "port_offset": offset if coexist else 0,
+        "instance": instance,
+        "project": apim.project_for(variant, instance),
+        "mode": "coexist" if offset else "canonical",
+        "port_offset": offset,
         "pid": proc.pid,
         "log_path": str(log_path),
         "compose_file": str(apim.compose_file(variant)),
@@ -556,13 +559,13 @@ def apim_up(version: str = "latest", variant: str = "default", pull: bool = True
         "license": {"mounted": bool(license_path), "path": license_path, "source": license_src},
         "downed_conflicts": downed,
         "ports": ports,
-        "urls": urls,
+        "urls": _apim_urls(role_ports),
         "warnings": warnings,
         "started": started,
-        "next": "Poll apim_status until overall: healthy (cold pulls take several minutes).",
+        "next": f"Poll apim_status(instance='{instance}') until overall: healthy.",
     }
     if variant == "kafka":
-        result["kafka"] = _kafka_demo(apim.project_name("kafka"), role_ports)
+        result["kafka"] = _kafka_demo(apim.project_for("kafka", instance), role_ports)
     return result
 
 
@@ -609,40 +612,51 @@ def _kafka_demo(project: str, role_ports: dict) -> dict:
 
 
 @mcp.tool()
-def apim_status() -> dict:
-    """Status of the standalone APIM stack: overall verdict + per-service health.
-
-    Two signals like stack_status: the tracked up-process, and `docker compose ps`
-    for the gravitee-apim project. Reports the pinned version and access URLs.
-    """
-    return _apim_summarize()
+def apim_status(instance: str = "default") -> dict:
+    """Status of an APIM instance: overall verdict + per-service health, version,
+    variant, project, and access URLs. Pass `instance` to target a named stack."""
+    return _apim_summarize(instance)
 
 
 @mcp.tool()
-def apim_down(timeout_seconds: int = 180) -> dict:
-    """Stop the standalone APIM stack (`docker compose down`, volumes preserved)."""
-    result = apim.run_down(timeout_seconds, apim.current_variant())
-    apim.forget_up()
+def apim_list() -> dict:
+    """List all tracked APIM instances (for generalized coexist) with their status."""
+    instances = []
+    for name in apim.known_instances():
+        s = _apim_summarize(name)
+        instances.append({"instance": name, "overall": s["overall"], "variant": s["variant"],
+                          "version": s["version"], "project": s["project"],
+                          "mode": s["mode"], "urls": s["urls"]})
+    return {"status": "ok", "count": len(instances), "instances": instances}
+
+
+@mcp.tool()
+def apim_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
+    """Stop an APIM instance (`docker compose down`, volumes preserved)."""
+    variant = apim.current_variant(instance)
+    result = apim.run_down(timeout_seconds, variant, instance)
+    apim.forget_up(instance)
     if result["timed_out"]:
-        return {"status": "timeout", "message": f"down exceeded {timeout_seconds}s.",
+        return {"status": "timeout", "instance": instance, "message": f"down exceeded {timeout_seconds}s.",
                 "stdout_tail": (result["stdout"] or "")[-2000:],
                 "stderr_tail": (result["stderr"] or "")[-2000:]}
-    return {"status": "ok" if result["returncode"] == 0 else "error",
+    return {"status": "ok" if result["returncode"] == 0 else "error", "instance": instance,
             "returncode": result["returncode"],
             "stdout": result["stdout"], "stderr": result["stderr"]}
 
 
 @mcp.tool()
-def apim_logs(service: str, lines: int = 100) -> dict:
-    """Tail logs for one APIM service (`docker compose logs --tail=<lines> <service>`)."""
-    variant = apim.current_variant()
-    valid = apim.service_names(variant)
+def apim_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
+    """Tail logs for one service of an APIM instance."""
+    variant = apim.current_variant(instance)
+    valid = apim.service_names(variant, instance)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = apim.compose_logs(service, lines, variant)
+    p = apim.compose_logs(service, lines, variant, instance)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service,
-            "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
+            "instance": instance, "lines": lines, "returncode": p.returncode,
+            "logs": p.stdout or p.stderr}
 
 
 @mcp.tool()
@@ -656,10 +670,10 @@ def apim_latest_version() -> dict:
 
 
 # ── standalone AM (Access Management) stack tools ─────────────────────────────
-def _am_summarize() -> dict:
-    up = am.up_process_status()
-    rows = am.compose_ps()
-    expected = am.service_names()
+def _am_summarize(instance: str = "default") -> dict:
+    up = am.up_process_status(instance)
+    rows = am.compose_ps(instance)
+    expected = am.service_names(instance)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -685,45 +699,49 @@ def _am_summarize() -> dict:
     else:
         overall = "partial"
 
-    port = up.get("port") or am.current_port()
+    port = up.get("port") or am.current_port(instance)
     return {
         "overall": overall,
-        "version": up.get("version") or am.current_version(),
+        "instance": instance,
+        "version": up.get("version") or am.current_version(instance),
         "port": port,
+        "project": am.project_for(instance),
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
         "urls": am.urls_for(port),
-        "up_log_tail": runner.tail_file(am.up_log_path(), 40),
+        "up_log_tail": runner.tail_file(am.up_log_path(instance), 40),
         "checked_at": _now_iso(),
     }
 
 
 @mcp.tool()
-def am_up(version: str = "latest", port: int = 0, pull: bool = True,
-          recreate: bool = False, down_conflicting: bool = False) -> dict:
+def am_up(version: str = "latest", instance: str = "default", port: int = 0,
+          pull: bool = True, recreate: bool = False, down_conflicting: bool = False) -> dict:
     """Stand up a standalone Gravitee Access Management (AM) stack (background).
 
     Self-contained stack (nginx + mongo + gateway + management-api + console). Only
-    nginx is published to the host; everything else is internal. Pulls the pinned
-    version and `docker compose up -d`, returning immediately; poll `am_status`
-    (the management API is slow to become ready, so wait for overall: healthy).
+    nginx is published to the host. Poll `am_status(instance)` (the management API is
+    slow to become ready, so wait for overall: healthy).
+
+    Instances (generalized coexist): pass a unique `instance` to run MULTIPLE AM
+    stacks at once. instance="default" uses project gravitee-am on AM_NGINX_PORT
+    (8086); a named instance gets project gravitee-am-<name> on an auto-allocated
+    free port (or the explicit `port`).
 
     Args:
-        version: Image tag to pin (GIO_AM_VERSION). "latest" (default) resolves the
-            newest stable release from the AM repo (e.g. 4.12.1). Pass e.g. "4.11.10".
-        port: Host port for nginx (the only published port). 0 = AM_NGINX_PORT env or
-            8086. If it's taken by another stack, am_up does NOT start — it returns
-            "port_conflict"; pick another port or pass down_conflicting=true.
+        version: Image tag to pin (GIO_AM_VERSION). "latest" resolves the newest stable.
+        instance: unique name to run several stacks at once (default "default").
+        port: Host port for nginx. 0 = auto (default instance → 8086; named → next free).
         pull: Pull images before up (default).
-        recreate: `up -d --force-recreate` — reload/recreate (e.g. after a version change).
+        recreate: `up -d --force-recreate`.
         down_conflicting: Down the project holding the port first (no -v; data kept).
     """
-    if am.is_up_running():
+    if am.is_up_running(instance):
         return {"status": "already_running",
-                "message": "An AM up-process is already running. Use am_status."}
+                "message": f"AM instance '{instance}' is already running. Use am_status(instance='{instance}')."}
 
     docker_err = runner.docker_running_error()
     if docker_err:
@@ -733,39 +751,45 @@ def am_up(version: str = "latest", port: int = 0, pull: bool = True,
     if err:
         return {"status": "blocked", "message": err}
 
-    nginx_port = port or am.default_port()
-    conflict = am.conflict_on(nginx_port)
+    nginx_port = am.allocate_port(instance, port)
+    if nginx_port is None:
+        return {"status": "blocked", "message": "no free host port for a new AM instance."}
+
+    conflict = am.conflict_on(nginx_port, instance)
     downed = []
     if conflict:
         if not down_conflicting:
+            suggest = {
+                "different_port": {"tool": "am_up", "args": {"version": version, "instance": instance, "port": nginx_port + 1}},
+                "down_the_other": {"tool": "am_up", "args": {"version": version, "instance": instance, "down_conflicting": True}},
+            }
+            if instance == "default":
+                suggest["run_another_instance"] = {"tool": "am_up", "args": {"version": version, "instance": "b"}}
             return {
-                "status": "port_conflict",
-                "version": resolved,
+                "status": "port_conflict", "version": resolved, "instance": instance,
                 "message": (
                     f"port {nginx_port} is held by project '{conflict['project']}' "
-                    f"(container {conflict['container']}). AM was NOT started. Pass a "
-                    "different port=..., or down_conflicting=true to free it first."
+                    f"(container {conflict['container']}). AM instance '{instance}' was NOT started. "
+                    "Pass a different port=..., run a named instance, or down_conflicting=true."
                 ),
-                "conflict": conflict,
-                "suggest": {
-                    "different_port": {"tool": "am_up", "args": {"version": version, "port": nginx_port + 1}},
-                    "down_the_other": {"tool": "am_up", "args": {"version": version, "down_conflicting": True}},
-                },
+                "conflict": conflict, "suggest": suggest,
             }
         res = am.down_project(conflict["project"])
         downed.append({"project": conflict["project"], "returncode": res["returncode"]})
         if conflict["project"] == runner.docker_dir().name:
             state.forget_up()
 
-    log_path = am.up_log_path()
+    log_path = am.up_log_path(instance)
     log_path.write_bytes(b"")
-    proc = am.launch_up_background(resolved, nginx_port, pull, recreate, log_path)
+    proc = am.launch_up_background(resolved, nginx_port, pull, recreate, log_path, instance)
     started = _now_iso()
-    am.record_up(proc, resolved, nginx_port, log_path, started)
+    am.record_up(proc, resolved, nginx_port, instance, log_path, started)
 
     return {
         "status": "starting",
         "version": resolved,
+        "instance": instance,
+        "project": am.project_for(instance),
         "port": nginx_port,
         "pid": proc.pid,
         "log_path": str(log_path),
@@ -775,41 +799,53 @@ def am_up(version: str = "latest", port: int = 0, pull: bool = True,
         "downed_conflicts": downed,
         "urls": am.urls_for(nginx_port),
         "started": started,
-        "next": "Poll am_status until overall: healthy (the management API takes a while).",
+        "next": f"Poll am_status(instance='{instance}') until overall: healthy (mgmt API takes a while).",
     }
 
 
 @mcp.tool()
-def am_status() -> dict:
-    """Status of the standalone AM stack: overall verdict + per-service health, the
-    pinned version, the nginx port, and access URLs."""
-    return _am_summarize()
+def am_status(instance: str = "default") -> dict:
+    """Status of an AM instance: overall verdict + per-service health, version, port,
+    project, and access URLs. Pass `instance` to target a named stack."""
+    return _am_summarize(instance)
 
 
 @mcp.tool()
-def am_down(timeout_seconds: int = 180) -> dict:
-    """Stop the standalone AM stack (`docker compose down`, volumes preserved)."""
-    result = am.run_down(timeout_seconds)
-    am.forget_up()
+def am_list() -> dict:
+    """List all tracked AM instances (for generalized coexist) with their status."""
+    instances = []
+    for name in am.known_instances():
+        s = _am_summarize(name)
+        instances.append({"instance": name, "overall": s["overall"], "version": s["version"],
+                          "port": s["port"], "project": s["project"], "urls": s["urls"]})
+    return {"status": "ok", "count": len(instances), "instances": instances}
+
+
+@mcp.tool()
+def am_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
+    """Stop an AM instance (`docker compose down`, volumes preserved)."""
+    result = am.run_down(timeout_seconds, instance)
+    am.forget_up(instance)
     if result["timed_out"]:
-        return {"status": "timeout", "message": f"down exceeded {timeout_seconds}s.",
+        return {"status": "timeout", "instance": instance, "message": f"down exceeded {timeout_seconds}s.",
                 "stdout_tail": (result["stdout"] or "")[-2000:],
                 "stderr_tail": (result["stderr"] or "")[-2000:]}
-    return {"status": "ok" if result["returncode"] == 0 else "error",
+    return {"status": "ok" if result["returncode"] == 0 else "error", "instance": instance,
             "returncode": result["returncode"],
             "stdout": result["stdout"], "stderr": result["stderr"]}
 
 
 @mcp.tool()
-def am_logs(service: str, lines: int = 100) -> dict:
-    """Tail logs for one AM service (`docker compose logs --tail=<lines> <service>`)."""
-    valid = am.service_names()
+def am_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
+    """Tail logs for one service of an AM instance."""
+    valid = am.service_names(instance)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = am.compose_logs(service, lines)
+    p = am.compose_logs(service, lines, instance)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service,
-            "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
+            "instance": instance, "lines": lines, "returncode": p.returncode,
+            "logs": p.stdout or p.stderr}
 
 
 @mcp.tool()
