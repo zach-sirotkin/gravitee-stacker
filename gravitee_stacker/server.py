@@ -82,8 +82,6 @@ def _summarize() -> dict:
     labels = {svc: (by_service[svc]["label"] if svc in by_service else "missing")
               for svc in expected}
 
-    any_ok = any(l in _OK for l in labels.values())
-    any_bad = any(l in _BAD for l in labels.values())
     all_ok = bool(labels) and all(l in _OK for l in labels.values())
     nothing_created = bool(labels) and all(l == "missing" for l in labels.values())
 

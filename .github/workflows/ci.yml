@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Note: this covers the unit/packaging layer only. Live stack bring-ups are Docker-,
+# image-, and (for Kafka) EE-license-gated and heavy, so they aren't run in CI.
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx run ruff check gravitee_stacker
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable + build backend)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . build
+
+      - name: Syntax check
+        run: python -m compileall -q gravitee_stacker
+
+      - name: Import + tool-registration smoke
+        run: |
+          python - <<'PY'
+          import asyncio
+          from gravitee_stacker.server import mcp
+          from gravitee_stacker import apim, am
+          names = sorted(t.name for t in asyncio.run(mcp.list_tools()))
+          assert len(names) >= 22, names
+          for req in ("apim_up", "am_up", "stack_up", "stack_preflight",
+                      "doctor", "apim_list", "am_list"):
+              assert req in names, f"missing tool: {req}"
+          # bundled data files must resolve from the installed package
+          for p in (apim.APIM_COMPOSE, apim.APIM_KAFKA_COMPOSE,
+                    am.AM_COMPOSE, am.AM_NGINX_CONF,
+                    apim.KAFKA_DIR / "ssl" / "server.keystore.jks"):
+              assert p.is_file(), f"missing bundled asset: {p}"
+          print(f"OK — {len(names)} tools, assets bundled")
+          PY
+
+      - name: Build wheel + install into a clean venv (distribution check)
+        run: |
+          python -m build --wheel
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/python -m pip install dist/*.whl
+          /tmp/fresh/bin/python -c "import asyncio; from gravitee_stacker.server import mcp; assert len(asyncio.run(mcp.list_tools())) >= 22; print('fresh-venv install OK')"
+          test -x /tmp/fresh/bin/gravitee-stacker

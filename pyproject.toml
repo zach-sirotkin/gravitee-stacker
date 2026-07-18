@@ -24,6 +24,13 @@ gravitee-stacker = "gravitee_stacker.server:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501", "E402", "E731", "E741"]  # line length, late imports, lambdas, ambiguous names
+
 [tool.hatch.build.targets.wheel]
 # packages includes ALL files under gravitee_stacker/ (composes, kafka certs/config,
 # am nginx conf) — not just .py — so no force-include is needed.
