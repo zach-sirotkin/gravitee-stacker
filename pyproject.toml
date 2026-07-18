@@ -4,11 +4,11 @@ version = "0.2.0"
 description = "MCP server that stands up and manages local Gravitee Docker stacks (APIM incl. native-Kafka, Access Management, and the Gamma demo) — any version, multiple at once."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Zachary Sirotkin", email = "zachary.sirotkin@graviteesource.com" }]
+license = { text = "Apache-2.0" }
+authors = [{ name = "The Gravitee team", email = "zachary.sirotkin@graviteesource.com" }]
 keywords = ["mcp", "gravitee", "apim", "access-management", "kafka", "gamma", "docker", "devtools"]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
