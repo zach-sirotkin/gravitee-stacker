@@ -4,6 +4,21 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-17
+
+### Added
+- **Generic quick-setup runner** (`quicksetup_*`) — fetch and run any of the ~two dozen
+  official `docker/quick-setup/*` configs from the APIM repo on demand, instead of
+  vendoring them. `quicksetup_list` enumerates the configs at a version; `quicksetup_up`
+  does a sparse + blobless depth-1 clone of just the one subdir at the pinned tag
+  (~1–2 s), copies it into a local workdir, drops `~/.gravitee/license.key` in when the
+  config mounts one, and runs it in the background under project `gravitee-qs-<name>`;
+  `quicksetup_status` / `quicksetup_logs` / `quicksetup_down` (with optional `-v`) round
+  it out. The fetched README is returned by `quicksetup_up` so any manual steps are at
+  hand. Reuses the existing background-process + two-signal-status + port-conflict
+  machinery. Runs upstream configs **as-is** (inherits their gotchas); one at a time,
+  since they hardcode ports and container names.
+
 ## [0.2.0] — 2026-07-17
 
 The tool grew from a single Gamma-stack wrapper into a multi-stack launcher and was

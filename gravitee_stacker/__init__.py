@@ -1,7 +1,9 @@
-"""gravitee-stacker — an MCP server that manages the Gravitee Gamma demo stack.
+"""gravitee-stacker — an MCP server that stands up and manages local Gravitee stacks.
 
-Thin wrapper over ``docker/run.sh`` in the stack repo. It does not reimplement
-orchestration; it invokes ``run.sh`` and surfaces status.
+Manages the Gravitee Gamma demo stack (a thin wrapper over ``docker/run.sh``), a
+self-contained standalone APIM stack (incl. a native-Kafka variant) and AM stack, and
+a generic runner for any official ``docker/quick-setup/*`` config. Everything runs via
+Docker Compose; bring-ups are backgrounded and surfaced through two-signal status.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

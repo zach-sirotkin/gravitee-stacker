@@ -1,7 +1,7 @@
 [project]
 name = "gravitee-stacker"
-version = "0.2.0"
-description = "MCP server that stands up and manages local Gravitee Docker stacks (APIM incl. native-Kafka, Access Management, and the Gamma demo) — any version, multiple at once."
+version = "0.3.0"
+description = "MCP server that stands up and manages local Gravitee Docker stacks (APIM incl. native-Kafka, Access Management, the Gamma demo, and any official quick-setup config) — any version, multiple at once."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

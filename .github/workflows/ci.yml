@@ -46,9 +46,10 @@ jobs:
           from gravitee_stacker.server import mcp
           from gravitee_stacker import apim, am
           names = sorted(t.name for t in asyncio.run(mcp.list_tools()))
-          assert len(names) >= 22, names
+          assert len(names) >= 27, names
           for req in ("apim_up", "am_up", "stack_up", "stack_preflight",
-                      "doctor", "apim_list", "am_list"):
+                      "doctor", "apim_list", "am_list",
+                      "quicksetup_list", "quicksetup_up", "quicksetup_down"):
               assert req in names, f"missing tool: {req}"
           # bundled data files must resolve from the installed package
           for p in (apim.APIM_COMPOSE, apim.APIM_KAFKA_COMPOSE,
@@ -63,5 +64,5 @@ jobs:
           python -m build --wheel
           python -m venv /tmp/fresh
           /tmp/fresh/bin/python -m pip install dist/*.whl
-          /tmp/fresh/bin/python -c "import asyncio; from gravitee_stacker.server import mcp; assert len(asyncio.run(mcp.list_tools())) >= 22; print('fresh-venv install OK')"
+          /tmp/fresh/bin/python -c "import asyncio; from gravitee_stacker.server import mcp; assert len(asyncio.run(mcp.list_tools())) >= 27; print('fresh-venv install OK')"
           test -x /tmp/fresh/bin/gravitee-stacker

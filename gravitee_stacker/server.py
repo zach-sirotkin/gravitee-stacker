@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
-from . import am, apim, runner, state
+from . import am, apim, quicksetup, runner, state
 
 mcp = FastMCP("gravitee-stacker")
 
@@ -867,6 +867,217 @@ def am_latest_version() -> dict:
         return {"status": "error", "message": err}
     return {"status": "ok", "latest_version": resolved,
             "repo": "https://github.com/gravitee-io/gravitee-access-management"}
+
+
+# ── generic quick-setup runner (any docker/quick-setup/* config) ──────────────
+def _quicksetup_summarize(name: str) -> dict:
+    up = quicksetup.up_process_status(name)
+    rows = quicksetup.compose_ps(name)
+    expected = quicksetup.service_names(name)
+    by = {}
+    for r in rows:
+        svc = r.get("Service") or r.get("Name", "?")
+        by[svc] = {
+            "service": svc,
+            "state": r.get("State", r.get("Status", "")),
+            "health": r.get("Health") or None,
+            "exit_code": r.get("ExitCode"),
+            "label": _classify(r.get("State", r.get("Status", "")), r.get("Health", ""), r.get("ExitCode")),
+        }
+    labels = {s: (by[s]["label"] if s in by else "missing") for s in expected}
+    all_ok = bool(labels) and all(l in _OK for l in labels.values())
+    nothing = bool(labels) and all(l == "missing" for l in labels.values())
+
+    if up.get("tracked") and up.get("running"):
+        overall = "starting"
+    elif up.get("tracked") and up.get("exit_code") not in (None, 0):
+        overall = "failed"
+    elif not expected or nothing:
+        overall = "down"
+    elif all_ok:
+        overall = "healthy"
+    else:
+        overall = "partial"
+
+    return {
+        "overall": overall,
+        "name": name,
+        "version": up.get("version") or quicksetup.current_version(name),
+        "project": quicksetup.project_for(name),
+        "up_process": up,
+        "ports": up.get("ports"),
+        "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
+                      "label": labels[s]} for s in expected],
+        "problems": [{"service": s, "label": labels[s]} for s in expected
+                     if labels[s] in _BAD or labels[s] == "missing"],
+        "up_log_tail": runner.tail_file(quicksetup.up_log_path(name), 40),
+        "checked_at": _now_iso(),
+    }
+
+
+@mcp.tool()
+def quicksetup_list(version: str = "latest") -> dict:
+    """List every official APIM `docker/quick-setup/*` config at the given version.
+
+    These are the upstream ready-made compose configs (mongodb, postgresql,
+    redis-rate-limit, keycloak, native-kafka, opensearch, prometheus, https-*,
+    distributed-sync*, ee-with-alert-engine, …). `quicksetup_up(name)` fetches and
+    runs one as-is. For the polished happy-path OSS/Kafka stacks prefer apim_up.
+
+    Also flags which configs already have a tracked up-record locally.
+    """
+    resolved, err = quicksetup.resolve_version(version)
+    if err:
+        return {"status": "error", "message": err}
+    names, err = quicksetup.list_configs(resolved)
+    if err:
+        return {"status": "error", "version": resolved, "message": err}
+    return {"status": "ok", "version": resolved, "count": len(names),
+            "configs": names, "running_locally": quicksetup.known_configs(),
+            "note": "Run one with quicksetup_up(name). One at a time — these composes "
+                    "hardcode ports/container names, so they can't coexist."}
+
+
+@mcp.tool()
+def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
+                  recreate: bool = False, down_conflicting: bool = False) -> dict:
+    """Fetch an official APIM quick-setup config and stand it up (background, non-blocking).
+
+    Fetches `docker/quick-setup/<name>` from the APIM repo at the pinned version, copies
+    it into a local workdir, drops ~/.gravitee/license.key in if the config mounts one,
+    then `docker compose -p gravitee-qs-<name> up -d`. Returns immediately — poll
+    `quicksetup_status(name)`.
+
+    IMPORTANT — this runs the UPSTREAM config verbatim, so it inherits that config's
+    gotchas and any MANUAL steps (keycloak realm import, native-kafka console setup,
+    mssql/postgres backends, …). The fetched README is returned here — read it and relay
+    the manual steps to the user. For the curated, fully-automated OSS or native-Kafka
+    stacks, prefer `apim_up` instead.
+
+    NO coexist: these composes hardcode host ports (mostly 8082–8085) and container
+    names, so only ONE quick-setup runs at a time. On a port conflict it does NOT start
+    (status "port_conflict"); ask the user to down the other stack (down_conflicting=true)
+    — there is no port-shift option here.
+
+    Args:
+        name: config name from quicksetup_list (e.g. "redis-rate-limit", "keycloak").
+        version: APIM tag to pin ("latest" resolves the newest stable release).
+        pull: pull images before up (default).
+        recreate: `up -d --force-recreate`.
+        down_conflicting: down any project holding the needed ports first (no -v; data kept).
+    """
+    if quicksetup.is_up_running(name):
+        return {"status": "already_running",
+                "message": f"quick-setup '{name}' is already running. Use quicksetup_status(name='{name}')."}
+
+    docker_err = runner.docker_running_error()
+    if docker_err:
+        return {"status": "blocked", "message": docker_err}
+
+    resolved, err = quicksetup.resolve_version(version)
+    if err:
+        return {"status": "blocked", "message": err}
+
+    fetched, err = quicksetup.fetch(name, resolved)
+    if err:
+        return {"status": "blocked", "message": err}
+
+    warnings = []
+    if fetched.needs_license and not fetched.license_mounted:
+        warnings.append(
+            f"'{name}' mounts ./.license but no license was found (checked ~/.gravitee/license.key "
+            "and APIM_LICENSE). Enterprise features in this config won't start; OSS parts still will.")
+
+    try:
+        ports = quicksetup.published_ports(name)
+    except (RuntimeError, ValueError) as e:
+        return {"status": "blocked", "message": f"could not read compose config: {e}"}
+
+    conflicts = quicksetup.detect_conflicts(name, ports)
+    downed = []
+    if conflicts:
+        if not down_conflicting:
+            return {
+                "status": "port_conflict", "name": name, "version": resolved, "ports": ports,
+                "message": (
+                    f"port(s) needed by quick-setup '{name}' are held by other stack(s): "
+                    f"{[(c['port'], c['project']) for c in conflicts]}. It was NOT started. "
+                    "These configs can't run on shifted ports — down the conflicting stack "
+                    "(down_conflicting=true) or stop whatever holds the ports, then retry."),
+                "conflicts": conflicts,
+                "conflicting_projects": sorted({c["project"] for c in conflicts}),
+                "suggest": {"down_conflicting": {"tool": "quicksetup_up",
+                                                 "args": {"name": name, "version": version, "down_conflicting": True}}},
+            }
+        gamma_project = runner.docker_dir().name
+        for proj in sorted({c["project"] for c in conflicts}):
+            res = apim.down_project(proj)
+            downed.append({"project": proj, "returncode": res["returncode"]})
+            if proj == gamma_project:
+                state.forget_up()
+
+    log_path = quicksetup.up_log_path(name)
+    log_path.write_bytes(b"")
+    proc = quicksetup.launch_up_background(name, resolved, pull, recreate, log_path)
+    started = _now_iso()
+    license_path = fetched.license_source and str(quicksetup.workdir(name) / ".license" / "license.key")
+    quicksetup.record_up(proc, name, resolved, ports, license_path, log_path, started)
+
+    return {
+        "status": "starting",
+        "name": name,
+        "version": resolved,
+        "project": quicksetup.project_for(name),
+        "workdir": fetched.workdir,
+        "pid": proc.pid,
+        "log_path": str(log_path),
+        "pull": pull,
+        "recreate": recreate,
+        "license": {"needed": fetched.needs_license, "mounted": fetched.license_mounted,
+                    "source": fetched.license_source},
+        "downed_conflicts": downed,
+        "ports": ports,
+        "warnings": warnings,
+        "started": started,
+        "readme": quicksetup.readme(name),
+        "next": f"Poll quicksetup_status(name='{name}') until overall: healthy. "
+                "Read `readme` above for any manual steps this config needs.",
+    }
+
+
+@mcp.tool()
+def quicksetup_status(name: str) -> dict:
+    """Status of a running quick-setup config: overall verdict + per-service health,
+    version, project, ports, and the up-log tail."""
+    return _quicksetup_summarize(name)
+
+
+@mcp.tool()
+def quicksetup_down(name: str, timeout_seconds: int = 180, volumes: bool = False) -> dict:
+    """Stop a quick-setup config (`docker compose down`). Pass volumes=true to also drop
+    its data volumes (`down -v`); default preserves them."""
+    result = quicksetup.run_down(name, timeout_seconds, volumes)
+    quicksetup.forget_up(name)
+    if result["timed_out"]:
+        return {"status": "timeout", "name": name, "message": f"down exceeded {timeout_seconds}s.",
+                "stdout_tail": (result["stdout"] or "")[-2000:],
+                "stderr_tail": (result["stderr"] or "")[-2000:]}
+    return {"status": "ok" if result["returncode"] == 0 else "error", "name": name,
+            "volumes_removed": volumes, "returncode": result["returncode"],
+            "stdout": result["stdout"], "stderr": result["stderr"]}
+
+
+@mcp.tool()
+def quicksetup_logs(name: str, service: str, lines: int = 100) -> dict:
+    """Tail logs for one service of a running quick-setup config."""
+    valid = quicksetup.service_names(name)
+    if service not in valid:
+        return {"status": "invalid_service", "message": f"unknown service '{service}'.",
+                "valid_services": valid}
+    p = quicksetup.compose_logs(name, service, lines)
+    return {"status": "ok" if p.returncode == 0 else "error", "service": service,
+            "name": name, "lines": lines, "returncode": p.returncode,
+            "logs": p.stdout or p.stderr}
 
 
 @mcp.tool()

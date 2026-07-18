@@ -56,7 +56,9 @@ and this project never touches the Gamma SDK repo's working tree.
 It manages **three independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
 a wrapper over the stack repo's `run.sh`), a self-contained standalone **APIM** stack
 (`apim_*`), and a self-contained standalone **AM** (Access Management) stack (`am_*`) —
-the last two shipped with the tool.
+the last two shipped with the tool. Beyond those curated stacks, a generic
+**quick-setup runner** (`quicksetup_*`) can fetch and run any of the ~two dozen official
+`docker/quick-setup/*` configs from the APIM repo on demand.
 
 Two meta tools:
 
@@ -121,6 +123,34 @@ overlaps nothing else (Gamma/APIM use 80–8085), it usually just runs; if the p
 taken it reports the conflict. UIs are path-routed through nginx: console
 `http://localhost:{port}/am/ui/` (admin/adminadmin), management API `…/am/management/`,
 gateway `…/am/`.
+
+### Quick-setup configs (`quicksetup_*`)
+
+The APIM repo ships ~two dozen ready-made compose configs under `docker/quick-setup/`
+(mongodb, postgresql, redis-rate-limit, keycloak, native-kafka, opensearch, prometheus,
+opentelemetry-jaeger, https-\*, distributed-sync\*, ee-with-alert-engine, …). Rather than
+vendor and maintain 26 copies, this runner **fetches one on demand** at the pinned APIM
+version (a sparse + blobless depth-1 clone of just that subdir, ~1–2 s) and runs it
+**as-is** under project `gravitee-qs-<name>`.
+
+| Tool                | What it does                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------- |
+| `quicksetup_list`   | List every `docker/quick-setup/*` config at a version (`"latest"` or a tag), plus which are running locally. |
+| `quicksetup_up`     | Fetch `<name>` + `docker compose up -d` in the background. Drops `~/.gravitee/license.key` in if the config mounts one. On a port conflict returns `port_conflict`. Returns the fetched **README** so its manual steps are at hand. Options: `version`, `pull`, `recreate`, `down_conflicting`. |
+| `quicksetup_status` | Overall verdict + per-service health, version, project, ports, up-log tail.                        |
+| `quicksetup_down`   | `docker compose down` (add `volumes=true` for `down -v`).                                          |
+| `quicksetup_logs`   | Tail one service of a running config.                                                              |
+
+**Boundaries (by design).** These are the "everything else" escape hatch; the curated
+`apim_*` / `am_*` stacks stay the polished, fully-automated happy-path.
+1. Runs the upstream config **verbatim** → it inherits that config's gotchas and any
+   **manual steps** (keycloak realm import, native-kafka console setup, mssql/postgres
+   backends). Read the returned README.
+2. **No coexist / no remap** — these composes hardcode host ports (mostly 8082–8085) and
+   container names (`gio_apim_*`), so only **one quick-setup runs at a time**. Conflict
+   detection and down-the-other work; shifting ports does not.
+3. **EE configs** (`ee-with-alert-engine`, `native-kafka`, …) need a license — dropped in
+   automatically from `~/.gravitee/license.key`/`APIM_LICENSE` when present.
 
 ### Running multiple stacks at once (generalized coexist)
 
