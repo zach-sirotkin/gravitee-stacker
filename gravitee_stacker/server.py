@@ -455,8 +455,15 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
 
     Pulls the pinned version and `docker compose -p <project> up -d`, returning
     immediately; poll `apim_status(instance)`. On a port conflict it does NOT start —
-    returns "port_conflict". Tip: for a user-facing bring-up, call `stack_preflight`
-    first (ask version + variant, then offer down-vs-coexist on conflict).
+    returns "port_conflict".
+
+    IMPORTANT — do NOT decide coexist-vs-down on the user's behalf. When the user asks
+    to bring up a stack, leave `instance="default"` unless they explicitly asked for a
+    second/named one. If the canonical ports are taken, DON'T silently start a named
+    coexist instance to dodge the conflict — instead surface the choice and let the user
+    pick: down the conflicting stack (`down_conflicting=true` / `apim_down`) OR run
+    alongside as a named `instance`. Run `stack_preflight` first to get that choice as a
+    structured payload, and confirm version + variant with the user before launching.
 
     Args:
         version: Image tag to pin ("latest" resolves the newest stable APIM release).
@@ -729,6 +736,11 @@ def am_up(version: str = "latest", instance: str = "default", port: int = 0,
     stacks at once. instance="default" uses project gravitee-am on AM_NGINX_PORT
     (8086); a named instance gets project gravitee-am-<name> on an auto-allocated
     free port (or the explicit `port`).
+
+    IMPORTANT — do NOT decide coexist-vs-down for the user. Leave `instance="default"`
+    unless they explicitly asked for a second one; if the port is taken, surface the
+    choice (down the conflicting stack vs run a named `instance`) rather than silently
+    coexisting. `stack_preflight` returns that choice as a structured payload.
 
     Args:
         version: Image tag to pin (GIO_AM_VERSION). "latest" resolves the newest stable.
