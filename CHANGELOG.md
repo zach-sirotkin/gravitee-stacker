@@ -52,6 +52,11 @@ name `gravitee-stacker`, console script `gravitee-stacker`).
 - **Instance port-allocation race** — two instances started in quick succession could
   grab the same port; allocation now also avoids ports/offsets already claimed by
   another tracked instance.
+- **Kafka broker crash-loop on the OAuth JWKS placeholder** — the vendored broker
+  config now defaults to `sasl.enabled.mechanisms=PLAIN` only (keyless + API-key demo
+  flows), with OAUTHBEARER commented out. Kafka eagerly initializes the OAuth validator
+  at startup and fatals if `sasl.oauthbearer.jwks.endpoint.url` is a placeholder /
+  unreachable host; re-enable it once you have a real JWKS.
 
 ## [0.1.0] — initial
 
