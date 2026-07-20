@@ -64,10 +64,12 @@ GOTCHAS = {
     },
     "mssql": {
         "severity": "broken",
-        "summary": "Same JDBC mechanism as postgresql: needs a SQL Server JDBC driver in "
-                   "./.driver or management-api/gateway crash-loop loading repository-jdbc. "
-                   "(Inferred from the postgresql finding — not independently verified.)",
-        "fix": "Drop the MSSQL JDBC jar into <workdir>/.driver/. Needs a download — NOT auto-applied.",
+        "summary": "Same as postgresql (verified): needs a SQL Server JDBC driver in ./.driver. "
+                   "Without it management-api crash-loops 'Unable to load repository "
+                   "repository-jdbc' while every container reports 'healthy'.",
+        "fix": "Download the MSSQL JDBC jar (learn.microsoft.com → 'Download Microsoft JDBC "
+               "Driver for SQL Server') into <workdir>/.driver/ and restart. Needs a download — "
+               "NOT auto-applied.",
     },
     "redis-rate-limit": {
         "severity": "broken",
