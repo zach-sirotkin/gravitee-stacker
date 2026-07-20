@@ -161,11 +161,18 @@ one plus **auto-applies the safe, download-free fixes** at fetch time:
 | ------ | ------ | -------- |
 | `redis-rate-limit` | `gravitee_ratelimit_redis_host=redis-rate-limit` ≠ service `redis_rate_limit` → gateway `UnknownHostException`, rate-limit silently fails **open** | **auto-fixed** (host → `redis_rate_limit`) |
 | `keycloak` | KC26 image but legacy `KEYCLOAK_IMPORT` + realm mounted to `/tmp` → the `gio` realm never imports, no tokens | **auto-fixed** (realm → `/opt/keycloak/data/import/`). Gateway token validation still needs `download-plugins-ext.sh` (a download) |
-| `postgresql` / `mssql` | needs a JDBC driver in `./.driver`; without it management-api crash-loops `Unable to load repository repository-jdbc` — while reporting **healthy** | **warn-only** (driver is a download) |
+| `postgresql` | needs a JDBC driver in `./.driver`; without it management-api crash-loops `Unable to load repository repository-jdbc` — while reporting **healthy** | **warn-only** (driver is a download) |
+| `mssql` | (1) same JDBC driver requirement as postgres; **(2)** bundled `init-db.sh` calls the old `/opt/mssql-tools/bin/sqlcmd` path (image now ships `mssql-tools18`) and omits `-C`, so the `gravitee` DB is never created | **(2) auto-fixed** (path + `-C`); **(1) warn-only** (driver is a download) |
 | `ee-with-alert-engine` | works, but a false healthcheck marks `alert_engine` **unhealthy** so status stays `partial` | **warn-only** (cosmetic) |
 
 The through-line: for these configs docker **`healthy`/`running` ≠ functional** — the
 `gotcha` field on `quicksetup_up`/`quicksetup_status` says when to distrust the verdict.
+
+Once the download-gated requirements are satisfied, all of these were verified working
+end-to-end: **postgresql** / **mssql** (drop the JDBC driver into `.driver` → an API
+persists via JDBC and serves through the gateway), and **keycloak** (run
+`download-plugins-ext.sh` → the OAuth2-secured API rejects requests with no/invalid token
+`401` and validates real Keycloak tokens).
 
 ### Running multiple stacks at once (generalized coexist)
 

@@ -4,6 +4,25 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-07-20
+
+### Added
+- **mssql `init-db.sh` auto-fix.** Verifying the download-gated configs surfaced a second
+  mssql defect: the bundled `init-db.sh` (which creates the `gravitee` database) calls the
+  old `/opt/mssql-tools/bin/sqlcmd` path — gone in the `2019-latest` image (now
+  `mssql-tools18`) — and omits `-C`, so with tools18/ODBC18's mandatory encryption the DB
+  is never created and management-api fails with `Cannot open database "gravitee"`. This is
+  a deterministic, download-free fix, so it's now **auto-applied at fetch** (path + `-C`);
+  the JDBC driver stays warn-only (a download). The auto-fix engine now patches any bundled
+  file (init scripts, …), not just `docker-compose.yml`.
+
+### Verified
+- All download-gated configs work once their requirement is satisfied: **postgresql** and
+  **mssql** (JDBC driver in `.driver` → an API persists via JDBC and serves through the
+  gateway; mssql's DB auto-creates via the fixed `init-db.sh`), and **keycloak** (the
+  `download-plugins-ext.sh` OAuth2 resource plugin → secured API returns `401` with no/bad
+  token and validates real Keycloak tokens).
+
 ## [0.4.0] — 2026-07-20
 
 ### Added

@@ -996,9 +996,11 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
         warnings.append(
             f"'{name}' mounts ./.license but no license was found (checked ~/.gravitee/license.key "
             "and APIM_LICENSE). Enterprise features in this config won't start; OSS parts still will.")
-    if fetched.gotcha and fetched.gotcha["severity"] == "broken" and not fetched.autofixes:
+    if fetched.gotcha and fetched.gotcha["severity"] == "broken":
+        applied = [a["fix"] for a in (fetched.autofixes or []) if a.get("applied")]
+        prefix = (f"auto-applied {len(applied)} fix(es) {applied}; " if applied else "")
         warnings.append(
-            f"KNOWN GOTCHA ({name}): {fetched.gotcha['summary']} FIX: {fetched.gotcha['fix']}")
+            f"KNOWN GOTCHA ({name}): {prefix}{fetched.gotcha['summary']} FIX: {fetched.gotcha['fix']}")
 
     try:
         ports = quicksetup.published_ports(name)

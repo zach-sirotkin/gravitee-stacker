@@ -64,12 +64,15 @@ GOTCHAS = {
     },
     "mssql": {
         "severity": "broken",
-        "summary": "Same as postgresql (verified): needs a SQL Server JDBC driver in ./.driver. "
-                   "Without it management-api crash-loops 'Unable to load repository "
-                   "repository-jdbc' while every container reports 'healthy'.",
-        "fix": "Download the MSSQL JDBC jar (learn.microsoft.com → 'Download Microsoft JDBC "
-               "Driver for SQL Server') into <workdir>/.driver/ and restart. Needs a download — "
-               "NOT auto-applied.",
+        "summary": "TWO defects (both verified): (1) like postgresql, needs a SQL Server JDBC "
+                   "driver in ./.driver or management-api crash-loops 'Unable to load repository "
+                   "repository-jdbc'. (2) the bundled init-db.sh (which creates the 'gravitee' DB) "
+                   "calls the OLD /opt/mssql-tools/bin/sqlcmd path (the 2019-latest image ships "
+                   "mssql-tools18) and omits -C, so the DB is never created and mgmt-api fails with "
+                   "'Cannot open database gravitee'. Both while every container reports 'healthy'.",
+        "fix": "init-db.sh is AUTO-FIXED at fetch (sqlcmd path + -C). You still must download the "
+               "MSSQL JDBC jar (learn.microsoft.com → 'Download Microsoft JDBC Driver for SQL "
+               "Server') into <workdir>/.driver/ and restart management_api + gateway.",
     },
     "redis-rate-limit": {
         "severity": "broken",
@@ -111,15 +114,25 @@ GOTCHAS = {
     },
 }
 
-# Deterministic, download-free (old, new) compose edits for `broken` configs whose
-# fix is a pure string change. Applied to <workdir>/docker-compose.yml at fetch time.
+# Deterministic, download-free (file, old, new) edits for `broken` configs whose fix
+# is a pure string change in a bundled file. Applied under <workdir>/ at fetch time.
 _AUTOFIX = {
     "redis-rate-limit": [
-        ("gravitee_ratelimit_redis_host=redis-rate-limit",
+        ("docker-compose.yml",
+         "gravitee_ratelimit_redis_host=redis-rate-limit",
          "gravitee_ratelimit_redis_host=redis_rate_limit")],
     "keycloak": [
-        ("./realm/realm-gio.json:/tmp/realm-gio.json",
+        ("docker-compose.yml",
+         "./realm/realm-gio.json:/tmp/realm-gio.json",
          "./realm/realm-gio.json:/opt/keycloak/data/import/realm-gio.json")],
+    "mssql": [
+        # init-db.sh creates the `gravitee` DB, but calls the OLD mssql-tools sqlcmd
+        # path (gone in the 2019-latest image → tools18) AND omits -C (tools18/ODBC18
+        # default to mandatory encryption + reject the self-signed cert). Both → the DB
+        # is never created and management-api can't connect. Fix path + add -C.
+        ("init-db.sh",
+         "/opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'Sql@2024Pass' -Q 'CREATE DATABASE gravitee'",
+         "/opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P 'Sql@2024Pass' -C -Q 'CREATE DATABASE gravitee'")],
 }
 
 
@@ -129,26 +142,34 @@ def gotcha_for(name: str) -> Optional[dict]:
 
 
 def apply_autofixes(name: str) -> list[dict]:
-    """Apply the deterministic, download-free fixes for `name` to the workdir compose.
+    """Apply the deterministic, download-free fixes for `name` under the workdir.
 
-    Returns a list of {fix, applied[, note]}. applied=False means the pattern wasn't
-    found (upstream may have fixed or changed it) — surfaced so drift is visible rather
-    than silently masked.
+    Each fix targets a bundled file (compose, init script, …). Returns a list of
+    {file, fix, applied[, note]}; applied=False means the pattern wasn't found
+    (upstream may have fixed/changed it) — surfaced so drift is visible, not masked.
     """
     edits = _AUTOFIX.get(name)
     if not edits:
         return []
-    cf = compose_path(name)
-    text = cf.read_text()
+    by_file: dict[str, list] = {}
+    for fname, old, new in edits:
+        by_file.setdefault(fname, []).append((old, new))
     results = []
-    for old, new in edits:
-        if old in text:
-            text = text.replace(old, new)
-            results.append({"fix": new, "applied": True})
-        else:
-            results.append({"fix": new, "applied": False,
-                            "note": "pattern not found (upstream may have changed) — left as-is"})
-    cf.write_text(text)
+    for fname, pairs in by_file.items():
+        fpath = workdir(name) / fname
+        if not fpath.is_file():
+            results += [{"file": fname, "fix": new, "applied": False,
+                         "note": f"{fname} not found — left as-is"} for _old, new in pairs]
+            continue
+        text = fpath.read_text()
+        for old, new in pairs:
+            if old in text:
+                text = text.replace(old, new)
+                results.append({"file": fname, "fix": new, "applied": True})
+            else:
+                results.append({"file": fname, "fix": new, "applied": False,
+                                "note": "pattern not found (upstream may have changed) — left as-is"})
+        fpath.write_text(text)
     return results
 
 
