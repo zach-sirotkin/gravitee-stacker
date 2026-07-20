@@ -348,34 +348,48 @@ Both use stdio transport and point at the venv's Python so no activation is need
 
 ### Claude Code
 
-Add to `~/.claude.json` (or a project `.mcp.json`) under `mcpServers`:
+The one-liner (user scope → available in every project). Point at the venv's console
+script and set `GAMMA_STACK_DIR`:
+
+```bash
+claude mcp add gravitee-stacker -s user \
+  -e GAMMA_STACK_DIR=/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk \
+  -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker
+```
+
+Verify, and later remove, with:
+
+```bash
+claude mcp get gravitee-stacker      # → Status: ✓ Connected
+claude mcp remove gravitee-stacker -s user
+```
+
+Equivalently, add to `~/.claude.json` (user scope) or a project `.mcp.json` by hand:
 
 ```json
 {
   "mcpServers": {
     "gravitee-stacker": {
-      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python",
-      "args": ["-m", "gravitee_stacker.server"],
-      "env": {
-        "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk"
-      }
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker",
+      "env": { "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk" }
     }
   }
 }
 ```
 
-Or with the CLI:
+Notes:
 
-```bash
-claude mcp add gravitee-stacker \
-  --env GAMMA_STACK_DIR=/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk \
-  -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python -m gravitee_stacker.server
-```
-
-> **Paths in the JSON must be absolute** — MCP clients don't expand `~` or `$HOME`.
-> Point `command` at this project's `.venv/bin/python` and `GAMMA_STACK_DIR` at your
-> local checkout of the stack repo. (If you `pipx install` this project, `command`
-> can just be `gravitee-stacker`.)
+- **Restart to pick up the tools.** MCP tools load at session start, so the
+  `mcp__gravitee-stacker__*` tools appear in a **new** Claude Code session, not the one
+  you ran `claude mcp add` in. Sanity-check with `doctor` or `quicksetup_list`.
+- **Editable install ⇒ no reinstall on edits.** If you installed with `pip install -e .`,
+  the console script runs the source tree in place — after changing the code, just
+  restart the session (or toggle the server) to load it.
+- **Paths must be absolute** — MCP clients don't expand `~`/`$HOME`. `GAMMA_STACK_DIR` is
+  only needed for the Gamma `stack_*` tools; APIM/AM/quick-setup need only Docker.
+- Prefer a PATH-stable install decoupled from the dev venv? `pipx install
+  /path/to/gravitee-stacker`, then set `command` to just `gravitee-stacker` (rebuild on
+  changes with `pipx reinstall`).
 
 ### Cursor
 
