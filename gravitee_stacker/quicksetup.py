@@ -46,6 +46,110 @@ QUICK_SETUP_PATH = "docker/quick-setup"
 LICENSE_MARKER = "./.license"  # a compose that mounts this wants a license in <workdir>/.license/
 
 
+# ── known gotchas + auto-remediation ──────────────────────────────────────────
+# Curated from a deep-functional sweep at 4.12.9 (see project memory). `severity`:
+#   "broken"     — non-functional as shipped until fixed (auto-fixed where the fix
+#                  is a deterministic, download-free compose edit).
+#   "misleading" — runs fine, but docker health / tool status misreports it.
+#   "info"       — works; a heads-up that saves debugging time.
+# A config with `auto_fix` in _AUTOFIX gets patched in the workdir at fetch time.
+GOTCHAS = {
+    "postgresql": {
+        "severity": "broken",
+        "summary": "Needs a PostgreSQL JDBC driver in ./.driver. Without it management-api "
+                   "+ gateway crash-loop 'Unable to load repository repository-jdbc' and the "
+                   "API never serves — even though every container reports 'healthy'.",
+        "fix": "Download the Postgres JDBC jar (https://jdbc.postgresql.org/download/) into "
+               "<workdir>/.driver/ and restart. Needs a download — NOT auto-applied.",
+    },
+    "mssql": {
+        "severity": "broken",
+        "summary": "Same JDBC mechanism as postgresql: needs a SQL Server JDBC driver in "
+                   "./.driver or management-api/gateway crash-loop loading repository-jdbc. "
+                   "(Inferred from the postgresql finding — not independently verified.)",
+        "fix": "Drop the MSSQL JDBC jar into <workdir>/.driver/. Needs a download — NOT auto-applied.",
+    },
+    "redis-rate-limit": {
+        "severity": "broken",
+        "summary": "Compose sets gravitee_ratelimit_redis_host=redis-rate-limit but the redis "
+                   "service is named redis_rate_limit → gateway UnknownHostException, the "
+                   "rate-limit store is unreachable and the policy silently fails OPEN (no 429).",
+        "fix": "Set gravitee_ratelimit_redis_host=redis_rate_limit. AUTO-APPLIED at fetch.",
+    },
+    "keycloak": {
+        "severity": "broken",
+        "summary": "Keycloak 26 image but legacy KEYCLOAK_IMPORT env + realm mounted to /tmp "
+                   "(KC26 imports from /opt/keycloak/data/import/) → the 'gio' realm never "
+                   "imports, /realms/gio 404s, no tokens issue.",
+        "fix": "Mount realm-gio.json into the KC26 import dir (AUTO-APPLIED at fetch). For the "
+               "GATEWAY to validate tokens you must also run download-plugins-ext.sh to fetch "
+               "gravitee-resource-oauth2-provider-keycloak (needs a download — not auto-applied). "
+               "README's token URL /auth/realms/gio is stale; KC26 uses /realms/gio.",
+    },
+    "ee-with-alert-engine": {
+        "severity": "misleading",
+        "summary": "alert_engine works (gateway connects and streams events) but its docker "
+                   "healthcheck hits :8072 and gets 401, so it shows 'unhealthy' and the tool's "
+                   "overall stays 'partial' forever. Firing an actual alert is a manual console step.",
+        "fix": "Ignore the unhealthy flag; confirm via gateway log 'Channel is ready to send data "
+               "to Alert Engine'. No compose fix needed.",
+    },
+    "prometheus": {
+        "severity": "info",
+        "summary": "README says the scrape endpoint is on :18092 but it's actually :18082 (which "
+                   "401s to a manual curl — Prometheus scrapes it internally). Gateway request "
+                   "metric is http_server_requests_total (Micrometer), not http_requests_total.",
+        "fix": None,
+    },
+    "opensearch": {
+        "severity": "info",
+        "summary": "v4 APIs report analytics to the gravitee-v4-metrics-* index, not the legacy "
+                   "gravitee-request-* (which stays empty and looks like a failure but isn't).",
+        "fix": None,
+    },
+}
+
+# Deterministic, download-free (old, new) compose edits for `broken` configs whose
+# fix is a pure string change. Applied to <workdir>/docker-compose.yml at fetch time.
+_AUTOFIX = {
+    "redis-rate-limit": [
+        ("gravitee_ratelimit_redis_host=redis-rate-limit",
+         "gravitee_ratelimit_redis_host=redis_rate_limit")],
+    "keycloak": [
+        ("./realm/realm-gio.json:/tmp/realm-gio.json",
+         "./realm/realm-gio.json:/opt/keycloak/data/import/realm-gio.json")],
+}
+
+
+def gotcha_for(name: str) -> Optional[dict]:
+    g = GOTCHAS.get(name)
+    return {"name": name, **g} if g else None
+
+
+def apply_autofixes(name: str) -> list[dict]:
+    """Apply the deterministic, download-free fixes for `name` to the workdir compose.
+
+    Returns a list of {fix, applied[, note]}. applied=False means the pattern wasn't
+    found (upstream may have fixed or changed it) — surfaced so drift is visible rather
+    than silently masked.
+    """
+    edits = _AUTOFIX.get(name)
+    if not edits:
+        return []
+    cf = compose_path(name)
+    text = cf.read_text()
+    results = []
+    for old, new in edits:
+        if old in text:
+            text = text.replace(old, new)
+            results.append({"fix": new, "applied": True})
+        else:
+            results.append({"fix": new, "applied": False,
+                            "note": "pattern not found (upstream may have changed) — left as-is"})
+    cf.write_text(text)
+    return results
+
+
 # ── paths / project / env ─────────────────────────────────────────────────────
 def _root() -> Path:
     d = runner.state_dir() / "quicksetup"
@@ -145,6 +249,8 @@ class FetchResult:
     needs_license: bool
     license_mounted: bool
     license_source: Optional[str]
+    gotcha: Optional[dict] = None
+    autofixes: Optional[list] = None
 
 
 def fetch(name: str, version: str) -> tuple[Optional[FetchResult], Optional[str]]:
@@ -169,6 +275,10 @@ def fetch(name: str, version: str) -> tuple[Optional[FetchResult], Optional[str]
         shutil.rmtree(dst, ignore_errors=True)
         shutil.copytree(src, dst)
 
+    # Auto-apply the deterministic, download-free fixes for known-broken configs
+    # BEFORE anything reads the compose (license detection, port resolution, up).
+    autofixes = apply_autofixes(name)
+
     needs_license = LICENSE_MARKER in compose_path(name).read_text(errors="replace")
     license_mounted, license_source = False, None
     if needs_license:
@@ -181,7 +291,8 @@ def fetch(name: str, version: str) -> tuple[Optional[FetchResult], Optional[str]
 
     return FetchResult(name=name, version=version, workdir=str(dst),
                        needs_license=needs_license, license_mounted=license_mounted,
-                       license_source=license_source), None
+                       license_source=license_source,
+                       gotcha=gotcha_for(name), autofixes=autofixes or None), None
 
 
 def readme(name: str, limit: int = 6000) -> Optional[str]:

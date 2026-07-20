@@ -152,6 +152,21 @@ version (a sparse + blobless depth-1 clone of just that subdir, ~1–2 s) and ru
 3. **EE configs** (`ee-with-alert-engine`, `native-kafka`, …) need a license — dropped in
    automatically from `~/.gravitee/license.key`/`APIM_LICENSE` when present.
 
+**Known gotchas + auto-fixes.** Several upstream configs are broken or misleading as
+shipped (found in a deep-functional sweep at 4.12.9). The runner carries a curated
+`GOTCHAS` map — `quicksetup_list` flags them, and `quicksetup_up` returns the relevant
+one plus **auto-applies the safe, download-free fixes** at fetch time:
+
+| Config | Gotcha | Handling |
+| ------ | ------ | -------- |
+| `redis-rate-limit` | `gravitee_ratelimit_redis_host=redis-rate-limit` ≠ service `redis_rate_limit` → gateway `UnknownHostException`, rate-limit silently fails **open** | **auto-fixed** (host → `redis_rate_limit`) |
+| `keycloak` | KC26 image but legacy `KEYCLOAK_IMPORT` + realm mounted to `/tmp` → the `gio` realm never imports, no tokens | **auto-fixed** (realm → `/opt/keycloak/data/import/`). Gateway token validation still needs `download-plugins-ext.sh` (a download) |
+| `postgresql` / `mssql` | needs a JDBC driver in `./.driver`; without it management-api crash-loops `Unable to load repository repository-jdbc` — while reporting **healthy** | **warn-only** (driver is a download) |
+| `ee-with-alert-engine` | works, but a false healthcheck marks `alert_engine` **unhealthy** so status stays `partial` | **warn-only** (cosmetic) |
+
+The through-line: for these configs docker **`healthy`/`running` ≠ functional** — the
+`gotcha` field on `quicksetup_up`/`quicksetup_status` says when to distrust the verdict.
+
 ### Running multiple stacks at once (generalized coexist)
 
 `apim_*` and `am_*` take an **`instance`** name so you can run several stacks of the

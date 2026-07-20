@@ -4,6 +4,25 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-20
+
+### Added
+- **Quick-setup gotchas layer + auto-fixes.** A deep-functional sweep of the common
+  configs (prometheus, mongodb, opensearch, postgresql, redis-rate-limit, keycloak,
+  ee-with-alert-engine) at 4.12.9 found 3 of 7 broken as shipped. The runner now carries
+  a curated `GOTCHAS` map: `quicksetup_list` returns `known_gotchas`, and
+  `quicksetup_up` / `quicksetup_status` return the relevant `gotcha` (root cause + fix).
+  For the two broken configs whose fix is a deterministic, download-free compose edit,
+  `quicksetup_up` **auto-applies** it at fetch time and reports it under `autofixes`:
+  - `redis-rate-limit`: `gravitee_ratelimit_redis_host` `redis-rate-limit` → `redis_rate_limit`
+    (else the gateway throws `UnknownHostException` and rate-limit fails open).
+  - `keycloak`: realm mount `/tmp/realm-gio.json` → `/opt/keycloak/data/import/realm-gio.json`
+    (KC26 `--import-realm` dir; the legacy `KEYCLOAK_IMPORT` env is ignored, so the realm
+    never imported).
+  Warn-only for fixes that need a download (postgresql/mssql JDBC driver, keycloak oauth2
+  plugin) or are cosmetic (ee-with-alert-engine's false-`unhealthy` healthcheck). Theme:
+  for these configs docker `healthy`/`running` ≠ functional.
+
 ## [0.3.0] — 2026-07-17
 
 ### Added

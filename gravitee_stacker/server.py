@@ -910,6 +910,9 @@ def _quicksetup_summarize(name: str) -> dict:
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
+        # A known gotcha here means overall= may lie (e.g. 'healthy' but non-functional,
+        # or 'partial' from a false-unhealthy healthcheck). Surface it alongside.
+        "gotcha": quicksetup.gotcha_for(name),
         "up_log_tail": runner.tail_file(quicksetup.up_log_path(name), 40),
         "checked_at": _now_iso(),
     }
@@ -932,10 +935,16 @@ def quicksetup_list(version: str = "latest") -> dict:
     names, err = quicksetup.list_configs(resolved)
     if err:
         return {"status": "error", "version": resolved, "message": err}
+    gotchas = {n: {"severity": quicksetup.GOTCHAS[n]["severity"],
+                   "summary": quicksetup.GOTCHAS[n]["summary"]}
+               for n in names if n in quicksetup.GOTCHAS}
     return {"status": "ok", "version": resolved, "count": len(names),
             "configs": names, "running_locally": quicksetup.known_configs(),
+            "known_gotchas": gotchas,
             "note": "Run one with quicksetup_up(name). One at a time — these composes "
-                    "hardcode ports/container names, so they can't coexist."}
+                    "hardcode ports/container names, so they can't coexist. `known_gotchas` "
+                    "flags configs that are broken/misleading as shipped (from a functional "
+                    "sweep); quicksetup_up auto-applies the safe fixes and warns on the rest."}
 
 
 @mcp.tool()
@@ -987,6 +996,9 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
         warnings.append(
             f"'{name}' mounts ./.license but no license was found (checked ~/.gravitee/license.key "
             "and APIM_LICENSE). Enterprise features in this config won't start; OSS parts still will.")
+    if fetched.gotcha and fetched.gotcha["severity"] == "broken" and not fetched.autofixes:
+        warnings.append(
+            f"KNOWN GOTCHA ({name}): {fetched.gotcha['summary']} FIX: {fetched.gotcha['fix']}")
 
     try:
         ports = quicksetup.published_ports(name)
@@ -1038,10 +1050,14 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
         "downed_conflicts": downed,
         "ports": ports,
         "warnings": warnings,
+        "gotcha": fetched.gotcha,
+        "autofixes": fetched.autofixes,
         "started": started,
         "readme": quicksetup.readme(name),
         "next": f"Poll quicksetup_status(name='{name}') until overall: healthy. "
-                "Read `readme` above for any manual steps this config needs.",
+                + ("NOTE: this config has a known gotcha (see `gotcha`) — "
+                   "'healthy' may not mean functional. " if fetched.gotcha else "")
+                + "Read `readme` above for any manual steps this config needs.",
     }
 
 
