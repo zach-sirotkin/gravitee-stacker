@@ -60,14 +60,7 @@ and this project never touches the Gamma SDK repo's working tree.
 
 ## What it exposes
 
-It manages **three independent stacks**: the Gravitee **Gamma** demo stack (`stack_*`,
-a wrapper over the stack repo's `run.sh`), a self-contained standalone **APIM** stack
-(`apim_*`), and a self-contained standalone **AM** (Access Management) stack (`am_*`) —
-the last two shipped with the tool. Beyond those curated stacks, a generic
-**quick-setup runner** (`quicksetup_*`) can fetch and run any of the ~two dozen official
-`docker/quick-setup/*` configs from the APIM repo on demand.
-
-Two meta tools:
+The stack families listed above, tool by tool. Two meta tools first:
 
 | Tool              | What it does                                                                                          |
 | ----------------- | ---------------------------------------------------------------------------------------------------- |
@@ -258,8 +251,8 @@ also binds a Kafka listener on **:9092** TLS/SNI). Vendored from Gravitee's offi
 gotchas designed out (no `gio_apim_*` name collisions, a real kafka healthcheck, restart
 policies, trimmed kibana/mailhog/kafka-ui, no fragile host mounts). **Requires an EE
 license with the Kafka feature** (blocks otherwise — the gateway won't bind :9092
-without it). Pin a Kafka-tested version (e.g. `version="4.11.12"`). Runs on default
-ports; coexist isn't supported for this variant yet. After healthy, verify with
+without it). Any recent release works (verified on 4.12.x). Runs on default ports;
+coexist isn't supported for this variant (single-instance). After healthy, verify with
 `apim_logs("apim-gateway")` for `Kafka server ready to accept connections on port 9092`.
 
 One-time console config (per fresh build — it lives in Mongo, not the files): at the
@@ -324,25 +317,16 @@ file. Two ways to change it safely:
   to remap ports, your compose should parameterize them as `${APIM_GATEWAY_PORT:-8082}`
   etc. (as the shipped one does); otherwise it still runs fine on canonical ports.
 
-### Ports — who owns which mode
+### Ports
 
-- **Gamma runs on canonical ports only.** Its consoles hardcode host-routing and
-  `:80` (the bootstrap `baseURL` has no port), so remapping breaks the UIs — Gamma is
-  strict by design. `stack_up` pre-checks its ports and, if one is taken, returns
-  `port_conflict` (`busy_ports`) without starting. Free them (or down the other stack)
-  and retry. UIs: `http://gamma.localhost`, `apim.localhost`, `portal.localhost`,
-  `am.localhost` (all via nginx on `:80`).
-- **APIM & AM support coexist** via named `instance`s (see "Running multiple stacks at
-  once" above), because their composes parameterize both the ports *and* the
-  console/portal API URLs — so a remap stays self-consistent. A named APIM instance
-  shifts by `APIM_PORT_OFFSET` (default 20000): gateway `28082`, mgmt-api `28083`,
-  console `28084`, portal `28085`. This lets a second APIM run **alongside** the first
-  (or alongside Gamma) with fully-working consoles.
+- **Gamma is canonical-ports-only** — its consoles hardcode host-routing on `:80`, so
+  remapping breaks the UIs (strict by design). `stack_up` pre-checks and returns
+  `port_conflict` without starting if a port is taken. UIs: `http://gamma.localhost`,
+  `apim.localhost`, `portal.localhost`, `am.localhost` (all via nginx on `:80`).
+- **APIM & AM coexist** via named `instance`s — see [Running multiple stacks](#running-multiple-stacks-at-once-generalized-coexist).
 
-Runtime state (tracked up-process metadata + `up.log`, per stack) lives in **this
-project's** `.run/` directory (gitignored here) — kept out of the stack repo so it
-never shows up as untracked noise. `run.sh` itself still runs with
-`cwd = $GAMMA_STACK_DIR/docker`.
+Runtime state (up-process metadata + `up.log`, per stack) lives in this project's `.run/`
+(gitignored), out of the stack repo. `run.sh` runs with `cwd = $GAMMA_STACK_DIR/docker`.
 
 ### Prerequisites (surfaced by `stack_up`'s pre-flight)
 
@@ -361,7 +345,7 @@ mid-startup failure.
 > Zach). Colleagues with access can install a pinned version straight from git without
 > cloning:
 > ```bash
-> pipx install "git+https://github.com/zach-sirotkin/gravitee-stacker@v0.4.1"
+> pipx install "git+https://github.com/zach-sirotkin/gravitee-stacker@v0.5.0"
 > ```
 > or grab the wheel attached to the matching [GitHub Release](https://github.com/zach-sirotkin/gravitee-stacker/releases).
 
@@ -434,17 +418,14 @@ Notes:
 
 ### Cursor
 
-Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
+Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project) — same block as above:
 
 ```json
 {
   "mcpServers": {
     "gravitee-stacker": {
-      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python",
-      "args": ["-m", "gravitee_stacker.server"],
-      "env": {
-        "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk"
-      }
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker",
+      "env": { "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk" }
     }
   }
 }
@@ -474,8 +455,8 @@ apim_list                                → see every running instance
 apim_down(instance="b")                  → tear down one instance (volumes preserved)
 ```
 
-Kafka variant + multiple instances:
+Kafka variant + features + multiple instances:
 ```
-apim_up(variant="kafka", version="4.11.12")   → native-Kafka gateway (EE license), :9092
+apim_up(variant="kafka", features=["prometheus","redis-rate-limit"])  → Kafka gateway + Prometheus + Redis (EE license), :9092
 am_up(instance="a")   /   am_up(instance="b")  → two AM stacks at once (8086 / 8087)
 ```
