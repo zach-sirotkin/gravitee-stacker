@@ -4,6 +4,16 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-07-21
+
+### Changed
+- Docs/clarity only (no functional change). Clarified the quick-setup "no coexist"
+  boundary in the tool docstrings (`quicksetup_up`, `quicksetup_list`) + module doc: it's
+  the *raw runner* that's one-at-a-time; to coexist or **combine** capabilities use
+  `apim_up(features=[…])`. README accuracy pass — corrected a stale install pin and the
+  Kafka version guidance (verified on 4.12.x), aligned the Cursor snippet on the console
+  script, and trimmed duplicated coexist / "what it exposes" prose.
+
 ## [0.5.0] — 2026-07-21
 
 ### Added
