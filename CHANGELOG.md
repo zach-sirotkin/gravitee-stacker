@@ -4,6 +4,15 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-07-21
+
+### Changed
+- Docs only. Added a **Claude Desktop** wiring section (the desktop app uses a separate
+  MCP config from Claude Code) documenting the two macOS GUI-app gotchas — a minimal
+  `PATH` (so `docker` isn't found) and TCC blocking `~/Documents`/`~/Desktop`/`~/Downloads`
+  (`PermissionError` on the venv) — with fixes: pin `PATH`, and keep the install out of
+  protected folders (or grant Full Disk Access).
+
 ## [0.5.1] — 2026-07-21
 
 ### Changed
