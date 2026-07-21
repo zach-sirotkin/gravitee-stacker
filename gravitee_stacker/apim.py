@@ -36,6 +36,19 @@ MAX_OFFSET = 40000  # 8085+40000=48085 stays a valid port; up to 3 concurrent in
 
 VARIANTS = ("default", "kafka")
 
+# Composable feature overlays: extra `-f apim-feature-<name>.yml` files layered onto the
+# base compose (OSS or kafka). Each adds a capability's service(s) + gateway env. They
+# attach to the `storage` network and reach apim-gateway by name. Coexist works because
+# the base + overlays are all port-parameterized (see _FEATURE_PORTS).
+FEATURES = ("prometheus", "redis-rate-limit")
+
+# feature -> [(coexist port env var, canonical default host port), …] for offset remap.
+# Features with only internal services (e.g. redis) contribute no host ports.
+_FEATURE_PORTS = {
+    "prometheus": [("APIM_PROMETHEUS_PORT", 9090)],
+    "redis-rate-limit": [],
+}
+
 # compose service name -> (coexist port env var, canonical default host port, url role)
 _ROLE = {
     "apim-gateway":        ("APIM_GATEWAY_PORT", 8082, "gateway"),
@@ -52,6 +65,25 @@ def requires_license(variant: str) -> bool:
 def supports_instances(variant: str) -> bool:
     """The kafka variant is single-instance (fixed *.kafka.local cert + broker ports)."""
     return variant != "kafka"
+
+
+def feature_compose(name: str) -> Path:
+    return _HERE / f"apim-feature-{name}.yml"
+
+
+def normalize_features(features) -> list[str]:
+    """De-dupe + order-preserve a features list; drop falsy. Validation is the caller's."""
+    seen, out = set(), []
+    for f in (features or []):
+        f = (f or "").strip()
+        if f and f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def unknown_features(features) -> list[str]:
+    return [f for f in normalize_features(features) if f not in FEATURES]
 
 
 # ── paths / project / env ─────────────────────────────────────────────────────
@@ -91,10 +123,12 @@ def compose_file(variant: str = "default") -> Path:
 
 
 def compose_args(variant: str = "default", instance: str = "default",
-                 license_path: Optional[str] = None) -> list[str]:
+                 license_path: Optional[str] = None, features=None) -> list[str]:
     args = ["-p", project_for(variant, instance), "-f", str(compose_file(variant))]
     if variant == "default" and license_path:
         args += ["-f", str(APIM_LICENSE_COMPOSE)]
+    for f in normalize_features(features):
+        args += ["-f", str(feature_compose(f))]
     return args
 
 
@@ -124,7 +158,7 @@ def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
 
 
 def _env(version: str = "latest", extra: Optional[dict] = None,
-         variant: str = "default", license_path: Optional[str] = None) -> dict:
+         variant: str = "default", license_path: Optional[str] = None, features=None) -> dict:
     env = runner._child_env()
     env["APIM_VERSION"] = version
     if variant == "kafka":
@@ -134,6 +168,10 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
         env["APIM_LICENSE"] = license_path or str(KAFKA_DIR / "ssl" / "kafka_server_jaas.conf")
     if license_path:
         env["APIM_LICENSE"] = license_path
+    # Feature overlays that mount bundled assets by absolute path need their env set so
+    # `${...}` interpolation resolves even for read-only `docker compose config`/`ps`.
+    if "prometheus" in normalize_features(features):
+        env["APIM_PROMETHEUS_CONFIG"] = str(_HERE / "prometheus.yml")
     if extra:
         env.update(extra)
     return env
@@ -141,10 +179,11 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
 
 # ── config-driven port/URL resolution ─────────────────────────────────────────
 def _config(extra_env: Optional[dict] = None, variant: str = "default",
-            instance: str = "default") -> dict:
+            instance: str = "default", features=None) -> dict:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(variant, instance), "config", "--format", "json"],
-        cwd=str(apim_state_dir()), env=_env("latest", extra_env, variant),
+        ["docker", "compose", *compose_args(variant, instance, features=features),
+         "config", "--format", "json"],
+        cwd=str(apim_state_dir()), env=_env("latest", extra_env, variant, features=features),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -166,23 +205,31 @@ def project_name(variant: str = "default", instance: str = "default") -> str:
     return project_for(variant, instance)
 
 
-def plan_ports(offset: int, variant: str = "default") -> dict:
+def plan_ports(offset: int, variant: str = "default", features=None) -> dict:
     """Effective published ports + URLs for the given host-port `offset` (0 = canonical).
 
     Ports don't depend on the instance (only the offset), so this is instance-free.
+    Feature overlays contribute their own host ports (e.g. prometheus :9090), remapped
+    by the same offset so a coexisting instance stays conflict-free.
     """
-    base = _service_ports(_config(variant=variant))
+    features = normalize_features(features)
+    base = _service_ports(_config(variant=variant, features=features))
     port_env = {}
     if offset:
         for svc, (var, default, _role) in _ROLE.items():
             port_env[var] = str(base.get(svc, [default])[0] + offset)
-    eff = _service_ports(_config(port_env, variant))
+        for f in features:
+            for var, default in _FEATURE_PORTS.get(f, []):
+                port_env[var] = str(default + offset)
+    eff = _service_ports(_config(port_env, variant, features=features))
     ports = sorted({p for lst in eff.values() for p in lst})
     urls = {role: eff[svc][0] for svc, (_v, _d, role) in _ROLE.items() if svc in eff}
+    if "prometheus" in features and "apim-prometheus" in eff:
+        urls["prometheus"] = eff["apim-prometheus"][0]
     return {"port_env": port_env, "ports": ports, "urls": urls}
 
 
-def allocate_offset(variant: str, instance: str) -> Optional[int]:
+def allocate_offset(variant: str, instance: str, features=None) -> Optional[int]:
     """Pick a host-port band for this instance. A re-up keeps the instance's existing
     band; default -> 0 (canonical); named -> lowest offset whose ports are free AND
     not already claimed by another tracked instance (avoids a start-up race)."""
@@ -196,7 +243,7 @@ def allocate_offset(variant: str, instance: str) -> Optional[int]:
         if off in claimed:
             continue
         try:
-            ports = plan_ports(off, variant)["ports"]
+            ports = plan_ports(off, variant, features)["ports"]
         except (RuntimeError, ValueError):
             return None
         if not runner.ports_in_use(ports):
@@ -230,10 +277,11 @@ def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str
 
 
 # ── docker compose introspection ──────────────────────────────────────────────
-def compose_ps(variant: str = "default", instance: str = "default") -> list[dict]:
+def compose_ps(variant: str = "default", instance: str = "default", features=None) -> list[dict]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(variant, instance), "ps", "--all", "--format", "json"],
-        cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
+        ["docker", "compose", *compose_args(variant, instance, features=features),
+         "ps", "--all", "--format", "json"],
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0 or not p.stdout.strip():
@@ -255,19 +303,19 @@ def compose_ps(variant: str = "default", instance: str = "default") -> list[dict
 
 
 def compose_logs(service: str, lines: int, variant: str = "default",
-                 instance: str = "default") -> subprocess.CompletedProcess:
+                 instance: str = "default", features=None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", *compose_args(variant, instance), "logs", "--no-color",
-         f"--tail={lines}", service],
-        cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
+        ["docker", "compose", *compose_args(variant, instance, features=features),
+         "logs", "--no-color", f"--tail={lines}", service],
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
         capture_output=True, text=True, timeout=60,
     )
 
 
-def service_names(variant: str = "default", instance: str = "default") -> list[str]:
+def service_names(variant: str = "default", instance: str = "default", features=None) -> list[str]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(variant, instance), "config", "--services"],
-        cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
+        ["docker", "compose", *compose_args(variant, instance, features=features), "config", "--services"],
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -312,8 +360,9 @@ def down_project(project: str) -> dict:
 # ── up / down lifecycle ───────────────────────────────────────────────────────
 def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dict,
                          license_path: Optional[str], log_path: Path,
-                         variant: str = "default", instance: str = "default") -> subprocess.Popen:
-    files = " ".join(shlex.quote(a) for a in compose_args(variant, instance, license_path))
+                         variant: str = "default", instance: str = "default",
+                         features=None) -> subprocess.Popen:
+    files = " ".join(shlex.quote(a) for a in compose_args(variant, instance, license_path, features))
     up = f"docker compose {files} up -d" + (" --force-recreate" if recreate else "")
     cmd = (f"docker compose {files} pull && {up}") if pull else up
 
@@ -322,7 +371,7 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     try:
         proc = subprocess.Popen(
             ["bash", "-c", cmd], cwd=str(apim_state_dir()),
-            env=_env(version, port_env, variant, license_path),
+            env=_env(version, port_env, variant, license_path, features),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -331,11 +380,11 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     return proc
 
 
-def run_down(timeout: int, variant: str = "default", instance: str = "default") -> dict:
+def run_down(timeout: int, variant: str = "default", instance: str = "default", features=None) -> dict:
     try:
         p = subprocess.run(
-            ["docker", "compose", *compose_args(variant, instance), "down"],
-            cwd=str(apim_state_dir()), env=_env("latest", variant=variant),
+            ["docker", "compose", *compose_args(variant, instance, features=features), "down"],
+            cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
             capture_output=True, text=True, timeout=timeout,
         )
         return {"timed_out": False, "returncode": p.returncode,
@@ -354,6 +403,7 @@ class ApimUp:
     version: str
     instance: str = "default"
     variant: str = "default"
+    features: Optional[list] = None
     coexist: bool = False
     offset: int = 0
     license: Optional[str] = None
@@ -371,9 +421,10 @@ _recs: dict[str, ApimUp] = {}
 
 def record_up(proc: subprocess.Popen, version: str, variant: str, instance: str, offset: int,
               license_path: Optional[str], urls: Optional[dict], ports: Optional[list],
-              log_path: Path, started: Optional[str]) -> ApimUp:
+              log_path: Path, started: Optional[str], features=None) -> ApimUp:
     rec = ApimUp(pid=proc.pid, log_path=str(log_path), version=version, instance=instance,
-                 variant=variant, coexist=(offset > 0), offset=offset, license=license_path,
+                 variant=variant, features=normalize_features(features),
+                 coexist=(offset > 0), offset=offset, license=license_path,
                  urls=urls, ports=ports, project=project_for(variant, instance),
                  compose=str(compose_file(variant)), started=started)
     _procs[instance] = proc
@@ -439,6 +490,11 @@ def current_version(instance: str = "default") -> Optional[str]:
 def current_variant(instance: str = "default") -> str:
     rec = _rec_for(instance)
     return (rec.variant if rec else None) or "default"
+
+
+def current_features(instance: str = "default") -> list[str]:
+    rec = _rec_for(instance)
+    return normalize_features(rec.features if rec else None)
 
 
 def current_offset(instance: str = "default") -> int:

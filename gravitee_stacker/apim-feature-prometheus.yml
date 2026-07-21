@@ -1,0 +1,24 @@
+# Feature overlay: Prometheus scraping of the APIM gateway.
+# Layer onto a base compose (OSS or kafka) with an extra -f:
+#   docker compose -f apim-compose.yml -f apim-feature-prometheus.yml up -d
+# Enables the gateway's internal prometheus metrics endpoint (core-services HTTP on
+# :18082, bound to 0.0.0.0 so it's scrapable) and adds a prometheus service that scrapes
+# it over the `storage` network. Only the prometheus UI is published to the host
+# (${APIM_PROMETHEUS_PORT:-9090}); the scrape happens container-to-container. The scrape
+# config is mounted from the absolute path the tool sets in APIM_PROMETHEUS_CONFIG.
+services:
+  apim-gateway:
+    environment:
+      - gravitee_services_core_http_host=0.0.0.0
+      - gravitee_services_metrics_enabled=true
+
+  apim-prometheus:
+    image: prom/prometheus:latest
+    restart: always
+    networks: [storage]
+    depends_on:
+      - apim-gateway
+    volumes:
+      - ${APIM_PROMETHEUS_CONFIG}:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${APIM_PROMETHEUS_PORT:-9090}:9090"

@@ -5,14 +5,21 @@ Gravitee Docker stacks from your AI assistant (Claude Code, Cursor, Claude Deskt
 launch any release on command, run several at once, no hand-rolled compose files.
 
 - **Standalone APIM** (`apim_*`) — a self-contained API Management stack; **needs only
-  Docker**. Variants: `default` (OSS) and `kafka` (native-Kafka gateway).
+  Docker**. Bases: `default` (OSS) and `kafka` (native-Kafka gateway), plus **composable
+  features** — layer `prometheus`, `redis-rate-limit`, … onto either base and mix them
+  freely (e.g. a Kafka stack *with* Prometheus scraping *and* Redis rate-limiting), all
+  coexist-safe.
 - **Standalone AM** (`am_*`) — a self-contained Access Management stack; needs only Docker.
+- **Any official quick-setup** (`quicksetup_*`) — fetch and run any of the ~two dozen
+  upstream `docker/quick-setup/*` configs (mongodb, postgresql, keycloak, native-kafka,
+  opensearch, prometheus, …) on demand, with known-gotcha auto-fixes.
 - **Gamma demo** (`stack_*`) — a thin wrapper over the Gamma SDK's `docker/run.sh`;
   needs the SDK repo + registry access (below).
 
 APIM and AM support **named instances** so you can run multiple stacks of the same kind
-at once (generalized coexist). A guided-launch helper (`stack_preflight`) resolves the
-version, checks ports, and offers down-vs-coexist on a conflict.
+at once (generalized coexist) — feature ports shift with the instance, so composed stacks
+coexist too. A guided-launch helper (`stack_preflight`) resolves the version, checks
+ports, and offers down-vs-coexist on a conflict.
 
 ## Quickstart
 
@@ -93,12 +100,31 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 
 | Tool                 | What it does                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------- |
-| `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
-| `apim_status`        | Overall verdict + per-service health, pinned version, variant, project, and URLs. Takes `instance`. |
-| `apim_list`          | List all tracked APIM instances with their status/version/URLs.                                    |
+| `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `features` (see below), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
+| `apim_status`        | Overall verdict + per-service health, pinned version, variant, features, project, and URLs. Takes `instance`. |
+| `apim_list`          | List all tracked APIM instances with their status/version/features/URLs.                           |
 | `apim_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
-| `apim_logs`          | Tail one APIM service. Takes `instance`.                                                            |
+| `apim_logs`          | Tail one APIM service (incl. feature services `apim-prometheus` / `apim-redis`). Takes `instance`. |
 | `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
+
+**Composable features.** Pass `features` to layer curated capability overlays onto either
+base (`default` or `kafka`) — each is a small compose fragment merged with `-f`, so they
+combine cleanly and mix freely:
+
+| Feature | Adds | Access |
+| ------- | ---- | ------ |
+| `prometheus` | a Prometheus that scrapes the gateway's metrics endpoint | Prometheus UI on **:9090** |
+| `redis-rate-limit` | points the gateway's rate-limit store at a bundled Redis | internal (no host port) |
+
+```
+apim_up(variant="kafka", features=["prometheus", "redis-rate-limit"])
+```
+…gives a native-Kafka gateway **with** Prometheus scraping **and** Redis rate-limiting in
+one stack. Features are **coexist-safe**: a named `instance` shifts the feature ports too
+(prometheus → 29090 at +20000), so composed stacks run side by side. These are the
+curated, mix-and-match counterpart to the run-upstream-verbatim `quicksetup_*` configs —
+reach for `features` when you want to *combine* capabilities and coexist; reach for
+`quicksetup_*` for one-off fidelity to a specific upstream config.
 
 ### Standalone AM stack (`am_*`)
 
@@ -148,7 +174,10 @@ version (a sparse + blobless depth-1 clone of just that subdir, ~1–2 s) and ru
    backends). Read the returned README.
 2. **No coexist / no remap** — these composes hardcode host ports (mostly 8082–8085) and
    container names (`gio_apim_*`), so only **one quick-setup runs at a time**. Conflict
-   detection and down-the-other work; shifting ports does not.
+   detection and down-the-other work; shifting ports does not. *If you want to coexist or
+   **combine** capabilities (e.g. Kafka + Prometheus + Redis in one stack), use `apim_up`
+   with [composable features](#standalone-apim-stack-apim_) instead — those are
+   port-parameterized and merge cleanly.*
 3. **EE configs** (`ee-with-alert-engine`, `native-kafka`, …) need a license — dropped in
    automatically from `~/.gravitee/license.key`/`APIM_LICENSE` when present.
 

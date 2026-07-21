@@ -377,14 +377,17 @@ def _apim_urls(role_ports: dict) -> dict:
         out["management API"] = f"http://localhost:{role_ports['management API']}/management"
     if role_ports.get("gateway"):
         out["gateway"] = f"http://localhost:{role_ports['gateway']}"
+    if role_ports.get("prometheus"):
+        out["prometheus"] = f"http://localhost:{role_ports['prometheus']}"
     return out
 
 
 def _apim_summarize(instance: str = "default") -> dict:
     up = apim.up_process_status(instance)
     variant = up.get("variant") or apim.current_variant(instance)
-    rows = apim.compose_ps(variant, instance)
-    expected = apim.service_names(variant, instance)
+    features = up.get("features") or apim.current_features(instance)
+    rows = apim.compose_ps(variant, instance, features)
+    expected = apim.service_names(variant, instance, features)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -415,7 +418,7 @@ def _apim_summarize(instance: str = "default") -> dict:
     role_ports = up.get("urls")
     if not role_ports:
         try:
-            role_ports = apim.plan_ports(offset, variant)["urls"]
+            role_ports = apim.plan_ports(offset, variant, features)["urls"]
         except (RuntimeError, ValueError):
             role_ports = {}
     return {
@@ -423,6 +426,7 @@ def _apim_summarize(instance: str = "default") -> dict:
         "instance": instance,
         "version": up.get("version") or apim.current_version(instance),
         "variant": variant,
+        "features": features,
         "project": apim.project_for(variant, instance),
         "mode": "coexist" if offset else "canonical",
         "up_process": up,
@@ -438,20 +442,33 @@ def _apim_summarize(instance: str = "default") -> dict:
 
 @mcp.tool()
 def apim_up(version: str = "latest", variant: str = "default", instance: str = "default",
-            pull: bool = True, down_conflicting: bool = False, recreate: bool = False,
-            license: str = "") -> dict:
+            features: list = None, pull: bool = True, down_conflicting: bool = False,
+            recreate: bool = False, license: str = "") -> dict:
     """Stand up a standalone Gravitee APIM stack (background, non-blocking).
 
-    Variants:
+    Variants (the gateway BASE):
       * "default" (OSS): mongo + es + gateway + management-api + console + portal.
       * "kafka": the native-Kafka gateway stack (adds a KRaft broker + kafka-client;
         gateway binds a Kafka listener on :9092 TLS). REQUIRES an EE license. Single
         instance / fixed ports.
 
+    Features (composable add-ons): pass `features` to layer capabilities onto EITHER
+    base — each is a curated compose overlay merged with `-f`. Available:
+      * "prometheus"       — adds a Prometheus that scrapes the gateway's metrics
+                             (Prometheus UI on host port 9090).
+      * "redis-rate-limit" — points the gateway's rate-limit store at a bundled Redis
+                             (Redis stays internal — no host port).
+    They combine freely, e.g. features=["prometheus","redis-rate-limit"], and on the
+    kafka base too — so `variant="kafka", features=[...]` is a Kafka stack with those
+    add-ons. (These are the curated, coexist-safe equivalent of the one-shot
+    `quicksetup_*` configs — prefer these when you want to MIX capabilities.)
+
     Instances (generalized coexist): pass a unique `instance` name to run MULTIPLE
     APIM stacks at once. instance="default" uses the canonical ports/project
     (gravitee-apim). A named instance gets its own project (gravitee-apim-<name>),
-    its own data volumes, and an auto-allocated host-port band (+20000, +40000, …).
+    its own data volumes, and an auto-allocated host-port band (+20000, +40000, …) —
+    feature ports (e.g. prometheus :9090) shift by the same offset, so composed stacks
+    coexist cleanly.
 
     Pulls the pinned version and `docker compose -p <project> up -d`, returning
     immediately; poll `apim_status(instance)`. On a port conflict it does NOT start —
@@ -467,8 +484,9 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
 
     Args:
         version: Image tag to pin ("latest" resolves the newest stable APIM release).
-        variant: "default" or "kafka".
+        variant: gateway base — "default" or "kafka".
         instance: unique name to run several stacks at once (default "default").
+        features: list of overlays to layer on, e.g. ["prometheus","redis-rate-limit"].
         pull: Pull images before up (default).
         down_conflicting: down conflicting projects first (no -v; data kept).
         recreate: `up -d --force-recreate`.
@@ -476,6 +494,11 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     """
     if variant not in apim.VARIANTS:
         return {"status": "blocked", "message": f"unknown variant '{variant}'; use one of {list(apim.VARIANTS)}."}
+    features = apim.normalize_features(features)
+    bad = apim.unknown_features(features)
+    if bad:
+        return {"status": "blocked",
+                "message": f"unknown feature(s) {bad}; available: {list(apim.FEATURES)}."}
     if not apim.supports_instances(variant) and instance != "default":
         return {"status": "blocked",
                 "message": f"the {variant} variant is single-instance (fixed ports); use instance='default'."}
@@ -503,13 +526,13 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     if variant == "kafka" and mem is not None and mem < 15.5:
         warnings.append(f"Docker has ~{mem:.1f} GiB; the Kafka stack wants >= 16 GiB.")
 
-    offset = apim.allocate_offset(variant, instance)
+    offset = apim.allocate_offset(variant, instance, features)
     if offset is None:
         return {"status": "blocked",
                 "message": f"no free host-port band for a new APIM instance (tried offsets up to {apim.MAX_OFFSET}). "
                            "Down an existing instance first (apim_list to see them)."}
     try:
-        plan = apim.plan_ports(offset, variant)
+        plan = apim.plan_ports(offset, variant, features)
     except (RuntimeError, ValueError) as e:
         return {"status": "blocked", "message": f"could not read compose config: {e}"}
     ports, port_env, role_ports = plan["ports"], plan["port_env"], plan["urls"]
@@ -545,14 +568,16 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     log_path = apim.up_log_path(instance)
     log_path.write_bytes(b"")
     proc = apim.launch_up_background(resolved, pull, recreate, port_env, license_path,
-                                    log_path, variant, instance)
+                                    log_path, variant, instance, features)
     started = _now_iso()
-    apim.record_up(proc, resolved, variant, instance, offset, license_path, role_ports, ports, log_path, started)
+    apim.record_up(proc, resolved, variant, instance, offset, license_path, role_ports, ports,
+                   log_path, started, features)
 
     result = {
         "status": "starting",
         "version": resolved,
         "variant": variant,
+        "features": features,
         "instance": instance,
         "project": apim.project_for(variant, instance),
         "mode": "coexist" if offset else "canonical",
@@ -631,8 +656,8 @@ def apim_list() -> dict:
     for name in apim.known_instances():
         s = _apim_summarize(name)
         instances.append({"instance": name, "overall": s["overall"], "variant": s["variant"],
-                          "version": s["version"], "project": s["project"],
-                          "mode": s["mode"], "urls": s["urls"]})
+                          "features": s.get("features"), "version": s["version"],
+                          "project": s["project"], "mode": s["mode"], "urls": s["urls"]})
     return {"status": "ok", "count": len(instances), "instances": instances}
 
 
@@ -640,7 +665,7 @@ def apim_list() -> dict:
 def apim_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
     """Stop an APIM instance (`docker compose down`, volumes preserved)."""
     variant = apim.current_variant(instance)
-    result = apim.run_down(timeout_seconds, variant, instance)
+    result = apim.run_down(timeout_seconds, variant, instance, apim.current_features(instance))
     apim.forget_up(instance)
     if result["timed_out"]:
         return {"status": "timeout", "instance": instance, "message": f"down exceeded {timeout_seconds}s.",
@@ -653,13 +678,15 @@ def apim_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
 
 @mcp.tool()
 def apim_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
-    """Tail logs for one service of an APIM instance."""
+    """Tail logs for one service of an APIM instance (incl. feature services like
+    apim-prometheus / apim-redis)."""
     variant = apim.current_variant(instance)
-    valid = apim.service_names(variant, instance)
+    features = apim.current_features(instance)
+    valid = apim.service_names(variant, instance, features)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = apim.compose_logs(service, lines, variant, instance)
+    p = apim.compose_logs(service, lines, variant, instance, features)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service,
             "instance": instance, "lines": lines, "returncode": p.returncode,
             "logs": p.stdout or p.stderr}

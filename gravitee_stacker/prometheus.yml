@@ -1,0 +1,15 @@
+# Scrape config for the prometheus feature overlay (mounted read-only into the
+# apim-prometheus service). Targets the gateway's core-services metrics endpoint by
+# service name on the shared `storage` network. Basic-auth creds are the gateway's
+# core-services defaults (admin/adminadmin).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'apim-gateway'
+    basic_auth:
+      username: admin
+      password: adminadmin
+    metrics_path: /_node/metrics/prometheus
+    static_configs:
+      - targets: ['apim-gateway:18082']

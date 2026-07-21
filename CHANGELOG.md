@@ -4,6 +4,28 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-21
+
+### Added
+- **Composable APIM features** — `apim_up(features=[…])` layers curated capability
+  overlays onto either base (`default` or `kafka`), merged via `docker compose -f`:
+  - `prometheus` — a Prometheus that scrapes the gateway's metrics endpoint (UI on :9090).
+  - `redis-rate-limit` — points the gateway's rate-limit store at a bundled Redis (internal).
+  They combine freely and on either base, so `apim_up(variant="kafka",
+  features=["prometheus","redis-rate-limit"])` is a native-Kafka gateway with Prometheus
+  scraping and Redis rate-limiting in one stack (verified live end-to-end). This is the
+  curated, coexist-safe counterpart to the one-shot `quicksetup_*` configs — reach for
+  `features` to *combine* capabilities, `quicksetup_*` for fidelity to a single upstream config.
+- **Composed stacks coexist** — feature host ports shift with the instance offset
+  (prometheus → 29090 at +20000), so two composed stacks run side by side. `apim_status`
+  / `apim_list` now report the active `features`; `apim_logs` tails feature services
+  (`apim-prometheus`, `apim-redis`).
+
+### Changed
+- The OSS base (`apim-compose.yml`) now declares explicit `storage`/`frontend` networks
+  (mirroring the kafka base) so feature overlays attach uniformly on any base. No change
+  to its published ports or behaviour.
+
 ## [0.4.1] — 2026-07-20
 
 ### Added

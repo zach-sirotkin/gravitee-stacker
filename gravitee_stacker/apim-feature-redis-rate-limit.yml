@@ -1,0 +1,18 @@
+# Feature overlay: Redis-backed rate limiting.
+# Layer onto a base compose (OSS or kafka) with an extra -f:
+#   docker compose -f apim-compose.yml -f apim-feature-redis-rate-limit.yml up -d
+# Points the gateway's rate-limit store at a bundled redis (instead of the default
+# mongo store). Redis stays internal on the `storage` network — no host port — so it
+# adds no coexist port math. FLUSHDB/FLUSHALL are disabled (matches the upstream config).
+services:
+  apim-gateway:
+    environment:
+      - gravitee_ratelimit_type=redis
+      - gravitee_ratelimit_redis_host=apim-redis
+      - gravitee_ratelimit_redis_port=6379
+
+  apim-redis:
+    image: redis:7.4-alpine
+    restart: always
+    networks: [storage]
+    command: redis-server --rename-command FLUSHDB "" --rename-command FLUSHALL ""
