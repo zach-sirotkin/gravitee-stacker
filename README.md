@@ -18,16 +18,16 @@ version, checks ports, and offers down-vs-coexist on a conflict.
 
 **Requirements:** Docker Desktop (running), Python 3.10+, macOS or Linux.
 
-**1. Install**
+**1. Install** (the repo is private — you need access; ask Zach to be added)
 ```bash
-git clone <this-repo-url> gravitee-stacker
+git clone https://github.com/zach-sirotkin/gravitee-stacker.git
 cd gravitee-stacker
 python3 -m venv .venv && ./.venv/bin/python -m pip install -e .
 ```
 
 **2. Register it** with your client — Claude Code:
 ```bash
-claude mcp add gravitee-stacker -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/python -m gravitee_stacker.server
+claude mcp add gravitee-stacker -s user -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker
 ```
 …or add the JSON block under [Wire it into a client](#wire-it-into-a-client) (Cursor / Claude Desktop use the same block). Use an **absolute** path — clients don't expand `~`.
 
@@ -326,8 +326,19 @@ mid-startup failure.
 
 ## Install / run
 
+> **Private tool — Gravitee only.** This repo is private; it's shared with Gravitee
+> people, not published to PyPI or made public. You need read access to the repo (ask
+> Zach). Colleagues with access can install a pinned version straight from git without
+> cloning:
+> ```bash
+> pipx install "git+https://github.com/zach-sirotkin/gravitee-stacker@v0.4.1"
+> ```
+> or grab the wheel attached to the matching [GitHub Release](https://github.com/zach-sirotkin/gravitee-stacker/releases).
+
+For local development, clone and install editable:
+
 ```bash
-git clone <this-repo-url> gravitee-stacker
+git clone https://github.com/zach-sirotkin/gravitee-stacker.git
 cd gravitee-stacker
 python3 -m venv .venv          # Python 3.10+
 ./.venv/bin/python -m pip install -e .

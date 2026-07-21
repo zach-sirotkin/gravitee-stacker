@@ -17,6 +17,11 @@ dependencies = [
     "mcp>=1.28.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/zach-sirotkin/gravitee-stacker"
+Changelog = "https://github.com/zach-sirotkin/gravitee-stacker/blob/main/CHANGELOG.md"
+Issues = "https://github.com/zach-sirotkin/gravitee-stacker/issues"
+
 [project.scripts]
 gravitee-stacker = "gravitee_stacker.server:main"
 

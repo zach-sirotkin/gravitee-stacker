@@ -1,0 +1,49 @@
+name: Release
+
+# Private distribution: on a version tag, build the wheel + sdist and attach them to a
+# GitHub Release. On a PRIVATE repo the release (and its assets) are visible only to
+# people with repo access — this is NOT published to PyPI. Cut a release with:
+#   git tag v0.4.1 && git push origin v0.4.1
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write  # needed to create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Verify the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(ls dist/*.whl | sed -E 's/.*gravitee_stacker-([^-]+)-.*/\1/')"
+          echo "tag=$tag  package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag '$tag' does not match package version '$pkg' (bump pyproject.toml + __init__.py)"
+            exit 1
+          fi
+
+      - name: Create GitHub Release with the wheel + sdist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Private release — install with:
+          \`\`\`
+          pipx install \"git+https://github.com/${{ github.repository }}@${GITHUB_REF_NAME}\"
+          \`\`\`
+          or download the wheel below. See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)."
