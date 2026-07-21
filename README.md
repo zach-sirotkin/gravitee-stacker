@@ -172,12 +172,13 @@ version (a sparse + blobless depth-1 clone of just that subdir, ~1–2 s) and ru
 1. Runs the upstream config **verbatim** → it inherits that config's gotchas and any
    **manual steps** (keycloak realm import, native-kafka console setup, mssql/postgres
    backends). Read the returned README.
-2. **No coexist / no remap** — these composes hardcode host ports (mostly 8082–8085) and
-   container names (`gio_apim_*`), so only **one quick-setup runs at a time**. Conflict
-   detection and down-the-other work; shifting ports does not. *If you want to coexist or
-   **combine** capabilities (e.g. Kafka + Prometheus + Redis in one stack), use `apim_up`
-   with [composable features](#standalone-apim-stack-apim_) instead — those are
-   port-parameterized and merge cleanly.*
+2. **One at a time (raw runner only)** — the upstream composes hardcode host ports
+   (mostly 8082–8085) and container names (`gio_apim_*`), so only **one quick-setup runs
+   at a time**, and there's no port-shift. Conflict detection and down-the-other work.
+   This limit is specific to running a config *verbatim* — **to coexist or to combine
+   capabilities** (e.g. Kafka + Prometheus + Redis in one stack, or two stacks at once),
+   use `apim_up` with [composable features](#standalone-apim-stack-apim_) instead, which
+   are port-parameterized and coexist-safe.
 3. **EE configs** (`ee-with-alert-engine`, `native-kafka`, …) need a license — dropped in
    automatically from `~/.gravitee/license.key`/`APIM_LICENSE` when present.
 

@@ -21,9 +21,12 @@ BOUNDARIES (surfaced in the tool docstrings + README):
   1. Runs the upstream config verbatim → inherits its gotchas + manual steps (keycloak
      realm import, native-kafka console setup, mssql/postgres backends). The curated
      apim_*/am_* stacks stay the polished happy-path; this is the "everything else".
-  2. NO coexist / no remap: these composes hardcode host ports (mostly 8082–8085) AND
-     container names (gio_apim_*), so only one quick-setup runs at a time. Conflict
-     detection + down-the-other work; shifting ports does not.
+  2. NO coexist / no remap FOR THE RAW RUNNER: these upstream composes hardcode host
+     ports (mostly 8082–8085) AND container names (gio_apim_*), so only one quick-setup
+     runs at a time. Conflict detection + down-the-other work; shifting ports does not.
+     (To coexist or COMBINE capabilities, use the curated apim_up(features=[…]) instead —
+     that path is port-parameterized and coexist-safe. This runner stays deliberately
+     one-at-a-time: its job is fidelity to a single upstream config.)
   3. EE configs (ee-with-alert-engine, native-kafka, …) need a license dropped in.
   4. The fetched README carries any manual steps — it's returned by up/status.
 """

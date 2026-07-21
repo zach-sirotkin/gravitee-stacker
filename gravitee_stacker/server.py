@@ -968,10 +968,12 @@ def quicksetup_list(version: str = "latest") -> dict:
     return {"status": "ok", "version": resolved, "count": len(names),
             "configs": names, "running_locally": quicksetup.known_configs(),
             "known_gotchas": gotchas,
-            "note": "Run one with quicksetup_up(name). One at a time — these composes "
-                    "hardcode ports/container names, so they can't coexist. `known_gotchas` "
-                    "flags configs that are broken/misleading as shipped (from a functional "
-                    "sweep); quicksetup_up auto-applies the safe fixes and warns on the rest."}
+            "note": "Run one with quicksetup_up(name). One at a time — the raw upstream "
+                    "composes hardcode ports/container names, so they can't coexist; to "
+                    "coexist or COMBINE capabilities (e.g. Kafka + Prometheus + Redis) use "
+                    "apim_up(features=[…]) instead. `known_gotchas` flags configs that are "
+                    "broken/misleading as shipped (from a functional sweep); quicksetup_up "
+                    "auto-applies the safe fixes and warns on the rest."}
 
 
 @mcp.tool()
@@ -990,10 +992,15 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
     the manual steps to the user. For the curated, fully-automated OSS or native-Kafka
     stacks, prefer `apim_up` instead.
 
-    NO coexist: these composes hardcode host ports (mostly 8082–8085) and container
-    names, so only ONE quick-setup runs at a time. On a port conflict it does NOT start
-    (status "port_conflict"); ask the user to down the other stack (down_conflicting=true)
-    — there is no port-shift option here.
+    NO coexist FOR THE RAW RUNNER: the upstream composes hardcode host ports (mostly
+    8082–8085) and container names, so only ONE quick-setup runs at a time. On a port
+    conflict it does NOT start (status "port_conflict"); ask the user to down the other
+    stack (down_conflicting=true) — there is no port-shift option for a raw quick-setup.
+    BUT if the user actually wants to COEXIST or COMBINE capabilities (e.g. Kafka +
+    Prometheus + Redis together, or two stacks at once), that IS supported — via
+    `apim_up(variant=…, features=[…], instance=…)`, which is port-parameterized and
+    coexist-safe. Prefer that whenever the goal is mixing/coexisting rather than fidelity
+    to one specific upstream config.
 
     Args:
         name: config name from quicksetup_list (e.g. "redis-rate-limit", "keycloak").
