@@ -431,6 +431,40 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project) — same bl
 }
 ```
 
+### Claude Desktop
+
+The desktop app has **its own MCP config**, separate from Claude Code — so registering
+in Claude Code does **not** make it appear in Desktop. Edit
+`~/Library/Application Support/Claude/claude_desktop_config.json` (Settings → Developer →
+Edit Config), add the block below, then **fully quit and reopen** the app (⌘Q — it reads
+the config at launch):
+
+```json
+{
+  "mcpServers": {
+    "gravitee-stacker": {
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker",
+      "env": {
+        "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk",
+        "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      }
+    }
+  }
+}
+```
+
+Two macOS gotchas hit **GUI apps only** (Claude Code, launched from a terminal, avoids
+both — so if it works there but not in Desktop, it's one of these):
+
+- **Pin `PATH`.** A GUI-launched process gets a minimal `PATH`, so `docker` (usually in
+  `/usr/local/bin` or `/opt/homebrew/bin`) isn't found and `doctor` reports *"docker not
+  on PATH"*. The `PATH` above covers `docker`/`git`/`lsof`.
+- **Keep the install out of a protected folder.** macOS TCC blocks GUI apps from reading
+  `~/Documents`, `~/Desktop`, and `~/Downloads`, so a clone there crashes the server with
+  `PermissionError: Operation not permitted` on its own `.venv`. Put the clone **and** the
+  Gamma SDK somewhere like `~/gravitee/` — or grant Claude **Full Disk Access** (System
+  Settings → Privacy & Security). Claude Code isn't affected.
+
 ## Typical flow
 
 Gamma demo stack:
