@@ -66,10 +66,15 @@ services:
         condition: service_healthy
       apim-elasticsearch:
         condition: service_healthy
+    volumes:
+      # user-added plugins (via apim_plugin_*) — bundled plugins stay in ./plugins.
+      - ${APIM_PLUGINS_DIR:-./.plugins}:/opt/graviteeio-gateway/plugins-ext
     environment:
       - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_ratelimit_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_reporters_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_plugins_path_0=$${gravitee.home}/plugins
+      - gravitee_plugins_path_1=$${gravitee.home}/plugins-ext
     healthcheck:
       # gateway answers HTTP on :8082 once up (404 on / is fine — we only need a connect).
       test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8082/ || exit 1"]
@@ -88,9 +93,13 @@ services:
         condition: service_healthy
       apim-elasticsearch:
         condition: service_healthy
+    volumes:
+      - ${APIM_PLUGINS_DIR:-./.plugins}:/opt/graviteeio-management-api/plugins-ext
     environment:
       - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_analytics_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_plugins_path_0=$${gravitee.home}/plugins
+      - gravitee_plugins_path_1=$${gravitee.home}/plugins-ext
       # Console/portal origins — let the mgmt-api resolve the org from the browser's
       # Origin (matters especially in coexist mode where the ports are remapped).
       - gravitee_installation_standalone_console_url=http://localhost:${APIM_CONSOLE_PORT:-8084}

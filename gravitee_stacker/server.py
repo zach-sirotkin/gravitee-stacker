@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
-from . import am, apim, quicksetup, runner, state
+from . import am, apim, plugins, quicksetup, runner, state
 
 mcp = FastMCP("gravitee-stacker")
 
@@ -700,6 +700,155 @@ def apim_latest_version() -> dict:
         return {"status": "error", "message": err}
     return {"status": "ok", "latest_version": resolved,
             "repo": "https://github.com/gravitee-io/gravitee-api-management"}
+
+
+# ── APIM plugin management (catalog + bundled + install) ──────────────────────
+@mcp.tool()
+def apim_plugin_search(query: str = "", type: str = "") -> dict:
+    """Search the Gravitee plugin CATALOG (download.gravitee.io) — everything you can add.
+
+    Lists plugin artifacts by name + type + latest version. `query` filters by substring
+    (e.g. "keycloak", "cache", "jwt"); `type` narrows to one of connectors, endpoints,
+    entrypoints, fetchers, notifiers, policies, reporters, repositories, resources,
+    service-discovery, services, tracers. With no query it lists everything under `type`.
+
+    Covers OSS *and* EE plugins (EE ones need an APIM license at runtime). To see what's
+    already BUNDLED in a version (no need to add), use apim_plugin_bundled. To check
+    compatibility of a specific plugin, use apim_plugin_info.
+    """
+    if type and type not in plugins.PLUGIN_TYPES:
+        return {"status": "error", "message": f"unknown type '{type}'; use one of {list(plugins.PLUGIN_TYPES)}."}
+    if not query and not type:
+        return {"status": "error",
+                "message": "provide a `query` (e.g. 'keycloak') or a `type` — listing ALL plugins across all "
+                           f"types is slow. Types: {list(plugins.PLUGIN_TYPES)}."}
+    try:
+        results = plugins.search(query, type)
+    except Exception as e:  # network/XML
+        return {"status": "error", "message": f"catalog query failed: {e}"}
+    return {"status": "ok", "query": query, "type": type or "all", "count": len(results),
+            "plugins": results,
+            "note": "Add one with apim_plugin_add(name). Check compatibility first with "
+                    "apim_plugin_info(name). Version numbers are the plugin's own line — NOT the APIM version."}
+
+
+@mcp.tool()
+def apim_plugin_info(name: str, version: str = "latest", type: str = "") -> dict:
+    """Inspect a catalog plugin: its manifest + which APIM version it was BUILT FOR.
+
+    Downloads the plugin and reads the build metadata embedded in its jar (pom.xml) →
+    the APIM baseline it targets (`gravitee-apim.version`, or the older
+    `gravitee-gateway-api.version`). Use this to sanity-check compatibility before adding,
+    since a plugin's version is its own line, not the APIM version.
+
+    Args:
+        name: plugin artifact (e.g. "gravitee-resource-oauth2-provider-keycloak").
+        version: "latest" (default) or an explicit version.
+        type: optional plugin type; auto-detected if omitted.
+    """
+    ptype = type or plugins.find_type(name)
+    if not ptype:
+        return {"status": "error", "message": f"could not find plugin '{name}' in the catalog; check the name via apim_plugin_search."}
+    resolved = plugins.latest_version(ptype, name) if version in ("", "latest") else version
+    if not resolved:
+        return {"status": "error", "message": f"no versions found for '{name}' ({ptype})."}
+    info = plugins.plugin_info(ptype, name, resolved)
+    info["status"] = "error" if info.get("error") else "ok"
+    return info
+
+
+@mcp.tool()
+def apim_plugin_bundled(version: str = "latest", component: str = "gateway") -> dict:
+    """List the plugins BUNDLED in an APIM image (already loaded — no need to add).
+
+    Runs `ls plugins/` inside graviteeio/apim-<component>:<version> (pulls the image if
+    not cached — that can take a while the first time). component: "gateway" or
+    "management-api". Compare against apim_plugin_search to see what's extra vs. bundled.
+    """
+    if component not in ("gateway", "management-api"):
+        return {"status": "error", "message": "component must be 'gateway' or 'management-api'."}
+    resolved, err = apim.resolve_version(version)
+    if err:
+        return {"status": "error", "message": err}
+    docker_err = runner.docker_running_error()
+    if docker_err:
+        return {"status": "blocked", "message": docker_err}
+    rows, err = plugins.bundled_plugins(resolved, component)
+    if err:
+        return {"status": "error", "version": resolved, "message": err}
+    return {"status": "ok", "version": resolved, "component": component,
+            "count": len(rows), "bundled": rows}
+
+
+@mcp.tool()
+def apim_plugin_add(source: str, version: str = "latest", type: str = "", instance: str = "default") -> dict:
+    """Add a plugin to a running APIM instance (download → plugins-ext → reload).
+
+    Follows Gravitee's documented approach: drop the plugin zip into the gateway's
+    `plugins-ext` dir and restart the node. This tool downloads the plugin, then recreates
+    the instance's gateway + management-api to load it.
+
+    `source` is EITHER a plugin artifact name (e.g. "gravitee-resource-oauth2-provider-
+    keycloak") — with the type auto-detected and `version` resolved (latest by default) —
+    OR a full download.gravitee.io URL to a plugin .zip (only that host is allowed).
+
+    Note: a plugin's version is its OWN line, not the APIM version — check compatibility
+    with apim_plugin_info first. EE plugins additionally need an APIM license on the stack.
+    If the instance isn't running, the plugin is staged and loads on the next apim_up.
+    """
+    if source.startswith("http://") or source.startswith("https://"):
+        url = source
+    else:
+        ptype = type or plugins.find_type(source)
+        if not ptype:
+            return {"status": "error", "message": f"could not find plugin '{source}' in the catalog (apim_plugin_search to find the name)."}
+        resolved = plugins.latest_version(ptype, source) if version in ("", "latest") else version
+        if not resolved:
+            return {"status": "error", "message": f"no versions found for '{source}' ({ptype})."}
+        url = plugins.plugin_url(ptype, source, resolved)
+
+    fname, err = plugins.install(instance, url)
+    if err:
+        return {"status": "error", "message": err}
+
+    if not apim.is_tracked(instance):
+        return {"status": "staged", "instance": instance, "plugin": fname,
+                "plugins_dir": str(apim.plugins_dir(instance)),
+                "message": f"'{fname}' staged in plugins-ext but instance '{instance}' isn't running; "
+                           "it will load on the next apim_up."}
+    res = apim.recreate_gateway(instance)
+    return {"status": "ok" if res.get("ok") else "error", "instance": instance, "plugin": fname,
+            "url": url, "reloaded": res.get("ok"),
+            "next": f"Poll apim_status(instance='{instance}'); check apim_logs('apim-gateway', instance='{instance}') "
+                    f"for the plugin loading (and any license error if it's an EE plugin).",
+            "recreate_output": res.get("output")}
+
+
+@mcp.tool()
+def apim_plugin_list(instance: str = "default") -> dict:
+    """List an instance's plugins: user-ADDED (via apim_plugin_add) and, if running, the
+    BUNDLED set loaded from the image."""
+    added = plugins.installed(instance)
+    out = {"status": "ok", "instance": instance, "added": added,
+           "plugins_dir": str(apim.plugins_dir(instance))}
+    if apim.is_tracked(instance):
+        version = apim.current_version(instance) or "latest"
+        rows, err = plugins.bundled_plugins(version, "gateway")
+        out["bundled_gateway"] = rows if not err else f"(unavailable: {err})"
+    return out
+
+
+@mcp.tool()
+def apim_plugin_remove(name: str, instance: str = "default") -> dict:
+    """Remove a user-added plugin from an instance (deletes the zip + reloads if running).
+    `name` is the zip filename or the artifact-name prefix."""
+    if not plugins.remove(instance, name):
+        return {"status": "not_found", "instance": instance,
+                "message": f"no added plugin matching '{name}'; see apim_plugin_list.",
+                "added": plugins.installed(instance)}
+    reloaded = apim.recreate_gateway(instance).get("ok") if apim.is_tracked(instance) else None
+    return {"status": "ok", "instance": instance, "removed": name, "reloaded": reloaded,
+            "remaining": plugins.installed(instance)}
 
 
 # ── standalone AM (Access Management) stack tools ─────────────────────────────

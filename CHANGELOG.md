@@ -4,6 +4,32 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-21
+
+### Added
+- **APIM plugin management** (`apim_plugin_*`) — add any Gravitee plugin to the curated
+  APIM stack, per Gravitee's documented approach (a per-instance `plugins-ext` dir
+  bind-mounted into the gateway + management-api, `gravitee_plugins_path_1`, recreate to
+  load). New `plugins.py` + six tools:
+  - `apim_plugin_search` — the **catalog** from download.gravitee.io (the S3 bucket is
+    listable with `Accept: text/xml`, as the site's own browser does); covers OSS **and**
+    APIM EE plugins, with latest versions.
+  - `apim_plugin_info` — downloads a plugin and reads the APIM version it was **built
+    for** from the embedded `pom.xml` (`gravitee-apim.version`, else the older
+    `gravitee-gateway-api.version`) — a real compatibility signal, since a plugin's
+    version is its own line.
+  - `apim_plugin_bundled` — lists what's **bundled** in an image (`ls plugins/`).
+  - `apim_plugin_add` (name+version or a download.gravitee.io URL → `plugins-ext` +
+    gateway reload), `apim_plugin_list`, `apim_plugin_remove`.
+  Verified end-to-end: `apim_plugin_add` of the keycloak OAuth2 resource → the gateway
+  logs `oauth2-keycloak-resource [4.0.0] has been loaded`. Not covered: plugins that live
+  only in private GitHub repos (AM EE IdP/MFA) — no release binary → build-from-source.
+
+### Fixed
+- `recreate_gateway` (used by plugin add/remove) now reconstructs a coexist instance's
+  shifted host-port band, so reloading a named instance no longer rebinds the canonical
+  ports and collides with the default stack.
+
 ## [0.5.2] — 2026-07-21
 
 ### Changed

@@ -99,6 +99,11 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 | `apim_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
 | `apim_logs`          | Tail one APIM service (incl. feature services `apim-prometheus` / `apim-redis`). Takes `instance`. |
 | `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
+| `apim_plugin_search` | Search the plugin **catalog** (download.gravitee.io) by name/type → latest version.                |
+| `apim_plugin_info`   | Inspect a catalog plugin's manifest + the **APIM version it was built for** (from its embedded pom). |
+| `apim_plugin_bundled`| List plugins **bundled** in an image (`ls plugins/` in `apim-<component>:<version>`).               |
+| `apim_plugin_add`    | Download a plugin (name+version or a download.gravitee.io URL) into `plugins-ext` + reload the gateway. Takes `instance`. |
+| `apim_plugin_list` / `apim_plugin_remove` | list added (+ bundled) / remove an added plugin. Takes `instance`.            |
 
 **Composable features.** Pass `features` to layer curated capability overlays onto either
 base (`default` or `kafka`) — each is a small compose fragment merged with `-f`, so they
@@ -118,6 +123,27 @@ one stack. Features are **coexist-safe**: a named `instance` shifts the feature 
 curated, mix-and-match counterpart to the run-upstream-verbatim `quicksetup_*` configs —
 reach for `features` when you want to *combine* capabilities and coexist; reach for
 `quicksetup_*` for one-off fidelity to a specific upstream config.
+
+**Plugins.** Add any Gravitee plugin to a running APIM instance, following Gravitee's
+documented approach (drop the zip into a `plugins-ext` dir + restart the node — the
+curated stack bind-mounts one per instance into the gateway + management-api). Three views:
+
+- **Catalog** — `apim_plugin_search("keycloak")` lists what's downloadable from
+  download.gravitee.io (all APIM plugins, OSS **and** EE — EE ones need a license at
+  runtime), with latest versions.
+- **Compatibility** — `apim_plugin_info(name)` downloads the plugin and reads the APIM
+  version it was **built for** from its embedded `pom.xml` (`gravitee-apim.version`). A
+  plugin's version is its *own* line, not the APIM version — check before adding.
+- **Bundled** — `apim_plugin_bundled(version)` lists what already ships in an image, so
+  you don't re-add something that's built in.
+
+`apim_plugin_add("gravitee-resource-oauth2-provider-keycloak")` resolves the latest
+version, downloads it into the instance's `plugins-ext`, and recreates the gateway to
+load it (`apim_plugin_list` / `apim_plugin_remove` manage what's added). You can also pass
+an explicit `version`, `type`, or a full download.gravitee.io URL.
+
+> Not covered: plugins that live **only** in private GitHub repos (e.g. the AM EE
+> IdP/MFA packs) — those ship no release binary and would need a build-from-source step.
 
 ### Standalone AM stack (`am_*`)
 

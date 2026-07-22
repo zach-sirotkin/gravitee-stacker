@@ -93,6 +93,15 @@ def apim_state_dir() -> Path:
     return d
 
 
+def plugins_dir(instance: str = "default") -> Path:
+    """Per-instance host dir bind-mounted into the gateway + mgmt-api as `plugins-ext`
+    (where user-added plugins go). Created here so the bind-mount source exists + is
+    user-owned before compose up."""
+    d = apim_state_dir() / ("plugins" if instance == "default" else f"plugins-{instance}")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _base_project(variant: str) -> str:
     return "gravitee-apim-kafka" if variant == "kafka" else "gravitee-apim"
 
@@ -158,9 +167,11 @@ def resolve_license(license_arg: str) -> tuple[Optional[str], str]:
 
 
 def _env(version: str = "latest", extra: Optional[dict] = None,
-         variant: str = "default", license_path: Optional[str] = None, features=None) -> dict:
+         variant: str = "default", license_path: Optional[str] = None, features=None,
+         instance: str = "default") -> dict:
     env = runner._child_env()
     env["APIM_VERSION"] = version
+    env["APIM_PLUGINS_DIR"] = str(plugins_dir(instance))
     if variant == "kafka":
         env["KAFKA_SSL_DIR"] = str(KAFKA_DIR / "ssl")
         env["KAFKA_SERVER_PROPS"] = str(KAFKA_DIR / "config" / "server.properties")
@@ -183,7 +194,7 @@ def _config(extra_env: Optional[dict] = None, variant: str = "default",
     p = subprocess.run(
         ["docker", "compose", *compose_args(variant, instance, features=features),
          "config", "--format", "json"],
-        cwd=str(apim_state_dir()), env=_env("latest", extra_env, variant, features=features),
+        cwd=str(apim_state_dir()), env=_env("latest", extra_env, variant, features=features, instance=instance),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -281,7 +292,7 @@ def compose_ps(variant: str = "default", instance: str = "default", features=Non
     p = subprocess.run(
         ["docker", "compose", *compose_args(variant, instance, features=features),
          "ps", "--all", "--format", "json"],
-        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features, instance=instance),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0 or not p.stdout.strip():
@@ -307,7 +318,7 @@ def compose_logs(service: str, lines: int, variant: str = "default",
     return subprocess.run(
         ["docker", "compose", *compose_args(variant, instance, features=features),
          "logs", "--no-color", f"--tail={lines}", service],
-        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features, instance=instance),
         capture_output=True, text=True, timeout=60,
     )
 
@@ -315,7 +326,7 @@ def compose_logs(service: str, lines: int, variant: str = "default",
 def service_names(variant: str = "default", instance: str = "default", features=None) -> list[str]:
     p = subprocess.run(
         ["docker", "compose", *compose_args(variant, instance, features=features), "config", "--services"],
-        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
+        cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features, instance=instance),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -371,7 +382,7 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     try:
         proc = subprocess.Popen(
             ["bash", "-c", cmd], cwd=str(apim_state_dir()),
-            env=_env(version, port_env, variant, license_path, features),
+            env=_env(version, port_env, variant, license_path, features, instance),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -380,11 +391,38 @@ def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dic
     return proc
 
 
+def recreate_gateway(instance: str = "default", timeout: int = 300) -> dict:
+    """Force-recreate the gateway + management-api of a tracked instance (to load newly
+    added plugins). Reads the instance's version/variant/features/license from its record."""
+    rec = _rec_for(instance)
+    if rec is None:
+        return {"ok": False, "error": f"instance '{instance}' is not tracked/running."}
+    version = rec.version or "latest"
+    variant = rec.variant or "default"
+    features = normalize_features(rec.features)
+    # Reconstruct the instance's shifted host-port band, or the recreate would rebind the
+    # canonical ports (8082-8085) and collide with the default stack in coexist mode.
+    try:
+        port_env = plan_ports(rec.offset or 0, variant, features)["port_env"]
+    except (RuntimeError, ValueError):
+        port_env = {}
+    args = compose_args(variant, instance, rec.license, features)
+    p = subprocess.run(
+        ["docker", "compose", *args, "up", "-d", "--force-recreate",
+         "apim-gateway", "apim-management-api"],
+        cwd=str(apim_state_dir()),
+        env=_env(version, port_env, variant, rec.license, features, instance),
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return {"ok": p.returncode == 0, "returncode": p.returncode,
+            "output": ((p.stdout or "") + (p.stderr or ""))[-1500:]}
+
+
 def run_down(timeout: int, variant: str = "default", instance: str = "default", features=None) -> dict:
     try:
         p = subprocess.run(
             ["docker", "compose", *compose_args(variant, instance, features=features), "down"],
-            cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features),
+            cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features, instance=instance),
             capture_output=True, text=True, timeout=timeout,
         )
         return {"timed_out": False, "returncode": p.returncode,
@@ -445,6 +483,13 @@ def _load(instance: str) -> Optional[ApimUp]:
 
 def _rec_for(instance: str) -> Optional[ApimUp]:
     return _recs.get(instance) or _load(instance)
+
+
+def is_tracked(instance: str = "default") -> bool:
+    """Whether this instance has a persisted up-record (was brought up) — i.e. its compose
+    project exists and can be recreated. Unlike is_up_running (which tracks the transient
+    `up -d` launcher process), this stays true for a running stack after launch completes."""
+    return _rec_for(instance) is not None
 
 
 def is_up_running(instance: str = "default") -> bool:

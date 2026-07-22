@@ -71,10 +71,13 @@ services:
     volumes:
       - ${APIM_LICENSE}:/opt/graviteeio-gateway/license/license.key:ro
       - ${KAFKA_SSL_DIR}:/opt/graviteeio-gateway/ssl
+      - ${APIM_PLUGINS_DIR:-./.plugins}:/opt/graviteeio-gateway/plugins-ext
     environment:
       - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_ratelimit_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_reporters_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_plugins_path_0=$${gravitee.home}/plugins
+      - gravitee_plugins_path_1=$${gravitee.home}/plugins-ext
       - gravitee_kafka_enabled=true
       - gravitee_kafka_ssl_keystore_password=gravitee
       - gravitee_kafka_ssl_keystore_path=$${gravitee.home}/ssl/server.keystore.jks
@@ -106,9 +109,12 @@ services:
       apim-elasticsearch: { condition: service_healthy }
     volumes:
       - ${APIM_LICENSE}:/opt/graviteeio-management-api/license/license.key:ro
+      - ${APIM_PLUGINS_DIR:-./.plugins}:/opt/graviteeio-management-api/plugins-ext
     environment:
       - gravitee_management_mongodb_uri=mongodb://apim-mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_analytics_elasticsearch_endpoints_0=http://apim-elasticsearch:9200
+      - gravitee_plugins_path_0=$${gravitee.home}/plugins
+      - gravitee_plugins_path_1=$${gravitee.home}/plugins-ext
       - gravitee_installation_standalone_console_url=http://localhost:${APIM_CONSOLE_PORT:-8084}
       - gravitee_installation_standalone_portal_url=http://localhost:${APIM_PORTAL_PORT:-8085}
     healthcheck:
