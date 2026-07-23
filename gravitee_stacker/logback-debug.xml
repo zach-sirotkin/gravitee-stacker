@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DEBUG logging config shipped by gravitee-stacker (feature: "debug-logging").
+
+  Mounted over config/logback.xml in the gateway AND the management-api. Deliberately
+  minimal + STDOUT-only rather than a copy of each component's upstream file:
+    * this tool surfaces logs via `docker compose logs` (apim_logs), so the upstream
+      rolling FILE appender writes where nothing reads it;
+    * one component-agnostic file avoids shipping two version-pinned copies that would
+      silently drift from the images.
+  Third-party loggers stay at WARN so the io.gravitee DEBUG output stays readable.
+-->
+<configuration>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- %X{api} is set by the gateway, %X{orgId}/%X{envId} by the management-api;
+                 whichever is absent renders empty. -->
+            <pattern>%d{HH:mm:ss.SSS} [%thread] [%X{api}%X{orgId}] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="async-console" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="STDOUT" />
+    </appender>
+
+    <logger name="io.gravitee" level="DEBUG" />
+    <logger name="com.graviteesource" level="DEBUG" />
+
+    <logger name="org.reflections" level="WARN" />
+    <logger name="org.springframework" level="WARN" />
+    <logger name="org.eclipse.jetty" level="WARN" />
+    <logger name="org.mongodb" level="WARN" />
+    <logger name="io.netty" level="WARN" />
+
+    <root level="WARN">
+        <appender-ref ref="async-console" />
+    </root>
+
+</configuration>

@@ -1,0 +1,20 @@
+# Feature overlay: verbose (DEBUG) gateway + management-api logging.
+#   docker compose -f apim-compose.yml -f apim-feature-debug-logging.yml up -d
+# Mounts the bundled logback-debug.xml (io.gravitee at DEBUG, STDOUT-only) over each
+# component's config/logback.xml. The image's levels are hardcoded (no env var flips
+# them), so replacing the file is the supported way — see Gravitee docs, "Debug Logging".
+#
+# This feature is ON BY DEFAULT (apim.DEFAULT_FEATURES). Opt out per-deploy with
+#   apim_up(features=["-debug-logging"])
+# or machine-wide with APIM_DEFAULT_FEATURES="".
+#
+# NOTE: this is verbose *logging*, distinct from APIM "Debug mode" (console policy
+# tracing) — that's a bundled plugin, enabled by default, and needs an EE license.
+services:
+  apim-gateway:
+    volumes:
+      - ${APIM_LOGBACK_DEBUG}:/opt/graviteeio-gateway/config/logback.xml:ro
+
+  apim-management-api:
+    volumes:
+      - ${APIM_LOGBACK_DEBUG}:/opt/graviteeio-management-api/config/logback.xml:ro

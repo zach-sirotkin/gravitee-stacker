@@ -458,6 +458,8 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
                              (Prometheus UI on host port 9090).
       * "redis-rate-limit" — points the gateway's rate-limit store at a bundled Redis
                              (Redis stays internal — no host port).
+      * "debug-logging"    — verbose DEBUG logs from the gateway + management-api
+                             (io.gravitee at DEBUG). **ON BY DEFAULT** — see below.
     They combine freely, e.g. features=["prometheus","redis-rate-limit"], and on the
     kafka base too — so `variant="kafka", features=[...]` is a Kafka stack with those
     add-ons. (These are the curated, coexist-safe equivalent of the one-shot
@@ -486,7 +488,11 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
         version: Image tag to pin ("latest" resolves the newest stable APIM release).
         variant: gateway base — "default" or "kafka".
         instance: unique name to run several stacks at once (default "default").
-        features: list of overlays to layer on, e.g. ["prometheus","redis-rate-limit"].
+        features: overlays to layer on, e.g. ["prometheus","redis-rate-limit"]. DEFAULTS
+            ("debug-logging") are applied to EVERY deploy on top of whatever you pass —
+            opt out per-deploy by prefixing with "-" (features=["-debug-logging"]), or
+            machine-wide via APIM_DEFAULT_FEATURES="". The result is reported back as
+            `features`, so you can always see what actually got layered on.
         pull: Pull images before up (default).
         down_conflicting: down conflicting projects first (no -v; data kept).
         recreate: `up -d --force-recreate`.
@@ -494,11 +500,13 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     """
     if variant not in apim.VARIANTS:
         return {"status": "blocked", "message": f"unknown variant '{variant}'; use one of {list(apim.VARIANTS)}."}
-    features = apim.normalize_features(features)
+    # Defaults-on: DEFAULT_FEATURES are layered into every deploy; "-name" opts out.
+    features = apim.resolve_features(features)
     bad = apim.unknown_features(features)
     if bad:
         return {"status": "blocked",
-                "message": f"unknown feature(s) {bad}; available: {list(apim.FEATURES)}."}
+                "message": f"unknown feature(s) {bad}; available: {list(apim.FEATURES)} "
+                           f"(prefix with '-' to opt out of a default: {list(apim.default_features())})."}
     if not apim.supports_instances(variant) and instance != "default":
         return {"status": "blocked",
                 "message": f"the {variant} variant is single-instance (fixed ports); use instance='default'."}

@@ -40,13 +40,19 @@ VARIANTS = ("default", "kafka")
 # base compose (OSS or kafka). Each adds a capability's service(s) + gateway env. They
 # attach to the `storage` network and reach apim-gateway by name. Coexist works because
 # the base + overlays are all port-parameterized (see _FEATURE_PORTS).
-FEATURES = ("prometheus", "redis-rate-limit")
+FEATURES = ("prometheus", "redis-rate-limit", "debug-logging")
+
+# Features layered onto EVERY deploy unless opted out. Override machine-wide with
+# APIM_DEFAULT_FEATURES (comma-separated; set it empty to disable all defaults), or
+# per-deploy by passing the feature prefixed with "-" (e.g. features=["-debug-logging"]).
+DEFAULT_FEATURES = ("debug-logging",)
 
 # feature -> [(coexist port env var, canonical default host port), …] for offset remap.
 # Features with only internal services (e.g. redis) contribute no host ports.
 _FEATURE_PORTS = {
     "prometheus": [("APIM_PROMETHEUS_PORT", 9090)],
     "redis-rate-limit": [],
+    "debug-logging": [],
 }
 
 # compose service name -> (coexist port env var, canonical default host port, url role)
@@ -82,7 +88,28 @@ def normalize_features(features) -> list[str]:
     return out
 
 
+def default_features() -> list[str]:
+    """Features applied to every deploy. APIM_DEFAULT_FEATURES overrides (empty = none)."""
+    raw = os.environ.get("APIM_DEFAULT_FEATURES")
+    if raw is not None:
+        return [f.strip() for f in raw.split(",") if f.strip()]
+    return list(DEFAULT_FEATURES)
+
+
+def resolve_features(requested) -> list[str]:
+    """Defaults-on resolution: start from the default set, then apply the caller's list.
+    An entry prefixed with "-" opts OUT of a default (e.g. "-debug-logging")."""
+    out = default_features()
+    for f in normalize_features(requested):
+        if f.startswith("-"):
+            out = [x for x in out if x != f[1:]]
+        elif f not in out:
+            out.append(f)
+    return out
+
+
 def unknown_features(features) -> list[str]:
+    """Unknown names in an already-resolved list (bare names, no '-' prefixes)."""
     return [f for f in normalize_features(features) if f not in FEATURES]
 
 
@@ -181,8 +208,11 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
         env["APIM_LICENSE"] = license_path
     # Feature overlays that mount bundled assets by absolute path need their env set so
     # `${...}` interpolation resolves even for read-only `docker compose config`/`ps`.
-    if "prometheus" in normalize_features(features):
+    _feats = normalize_features(features)
+    if "prometheus" in _feats:
         env["APIM_PROMETHEUS_CONFIG"] = str(_HERE / "prometheus.yml")
+    if "debug-logging" in _feats:
+        env["APIM_LOGBACK_DEBUG"] = str(_HERE / "logback-debug.xml")
     if extra:
         env.update(extra)
     return env

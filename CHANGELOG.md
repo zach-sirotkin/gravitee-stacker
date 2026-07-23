@@ -4,6 +4,24 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-07-22
+
+### Added
+- **`debug-logging` feature** — mounts a bundled `logback-debug.xml` over the gateway's and
+  management-api's `config/logback.xml`, putting `io.gravitee` at `DEBUG` (third-party
+  loggers stay at WARN so the output is readable). The images hardcode their log levels
+  with no env var to flip them, so replacing the file is the supported route (per the
+  Gravitee "Debug Logging" docs). Deliberately a minimal STDOUT-only config rather than a
+  version-pinned copy of each component's file — this tool reads logs via
+  `docker compose logs`, so the upstream rolling *file* appender adds nothing.
+- **Default features** — `apim.DEFAULT_FEATURES` is layered onto **every** deploy, with
+  `debug-logging` as the first member. Opt out per-deploy with a `-` prefix
+  (`features=["-debug-logging"]`) or machine-wide with `APIM_DEFAULT_FEATURES=""`.
+  `apim_up`/`apim_status` report the resolved feature list.
+
+### Changed
+- **Behaviour change:** new APIM deploys now log at `DEBUG` by default (see opt-out above).
+
 ## [0.6.0] — 2026-07-21
 
 ### Added

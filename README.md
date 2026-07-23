@@ -113,6 +113,20 @@ combine cleanly and mix freely:
 | ------- | ---- | ------ |
 | `prometheus` | a Prometheus that scrapes the gateway's metrics endpoint | Prometheus UI on **:9090** |
 | `redis-rate-limit` | points the gateway's rate-limit store at a bundled Redis | internal (no host port) |
+| `debug-logging` **(on by default)** | verbose `DEBUG` logs from the gateway + management-api (`io.gravitee` at DEBUG, via a bundled `logback-debug.xml`) | via `apim_logs` |
+
+**Defaults.** `debug-logging` is layered onto **every** deploy (`apim.DEFAULT_FEATURES`) —
+local stacks are for debugging, so verbose logs are the useful default. Opt out per-deploy
+by prefixing with `-`, or machine-wide via the env var:
+
+```
+apim_up(features=["-debug-logging"])          # this deploy: normal INFO/WARN logging
+APIM_DEFAULT_FEATURES=""                       # machine-wide: no default features
+```
+`apim_up`/`apim_status` report the **resolved** `features`, so you can always see what
+actually got layered on. (This is verbose *logging* — distinct from APIM **Debug mode**,
+the console's policy tracer, which is a bundled plugin, enabled by default, and needs an
+EE license.)
 
 ```
 apim_up(variant="kafka", features=["prometheus", "redis-rate-limit"])
