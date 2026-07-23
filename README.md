@@ -6,9 +6,17 @@ launch any release on command, run several at once, no hand-rolled compose files
 
 - **Standalone APIM** (`apim_*`) — a self-contained API Management stack; **needs only
   Docker**. Bases: `default` (OSS) and `kafka` (native-Kafka gateway), plus **composable
-  features** — layer `prometheus`, `redis-rate-limit`, … onto either base and mix them
-  freely (e.g. a Kafka stack *with* Prometheus scraping *and* Redis rate-limiting), all
-  coexist-safe.
+  features** — layer `prometheus`, `redis-rate-limit`, `debug-logging`, … onto either base
+  and mix them freely (e.g. a Kafka stack *with* Prometheus scraping *and* Redis
+  rate-limiting), all coexist-safe.
+- **Verbose logging out of the box** — the `debug-logging` feature (gateway +
+  management-api at `DEBUG`) is applied to **every** deploy by default, since local stacks
+  exist to be debugged. Opt out per-deploy with `features=["-debug-logging"]`, or
+  machine-wide with `APIM_DEFAULT_FEATURES=""`.
+- **Plugin management** (`apim_plugin_*`) — search the Gravitee plugin **catalog**
+  (download.gravitee.io), check **which APIM version a plugin was built for**, list what's
+  already **bundled** in an image, and **add/remove** plugins on a running stack
+  (downloaded into `plugins-ext`, gateway reloaded — Gravitee's documented approach).
 - **Standalone AM** (`am_*`) — a self-contained Access Management stack; needs only Docker.
 - **Any official quick-setup** (`quicksetup_*`) — fetch and run any of the ~two dozen
   upstream `docker/quick-setup/*` configs (mongodb, postgresql, keycloak, native-kafka,
