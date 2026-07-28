@@ -510,9 +510,16 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     if not apim.supports_instances(variant) and instance != "default":
         return {"status": "blocked",
                 "message": f"the {variant} variant is single-instance (fixed ports); use instance='default'."}
-    if apim.is_up_running(instance):
-        return {"status": "already_running",
-                "message": f"APIM instance '{instance}' is already running. Use apim_status(instance='{instance}')."}
+    # "Already up" = the tracked launcher is alive (mid-start) OR the project has running
+    # containers. The container check is authoritative: the launcher exits once `up -d`
+    # returns, so a genuinely-running stack must NOT be treated as absent and recreated.
+    if apim.is_up_running(instance) or apim.stack_running(variant, instance):
+        return {"status": "already_running", "instance": instance,
+                "project": apim.project_for(variant, instance),
+                "message": f"APIM instance '{instance}' is already running (project "
+                           f"{apim.project_for(variant, instance)}). Starting it again would RECREATE its "
+                           f"containers. Inspect with apim_status(instance='{instance}'), stop with "
+                           f"apim_down(instance='{instance}'), or run a SECOND stack as a named instance."}
 
     docker_err = runner.docker_running_error()
     if docker_err:
@@ -934,9 +941,13 @@ def am_up(version: str = "latest", instance: str = "default", port: int = 0,
         recreate: `up -d --force-recreate`.
         down_conflicting: Down the project holding the port first (no -v; data kept).
     """
-    if am.is_up_running(instance):
-        return {"status": "already_running",
-                "message": f"AM instance '{instance}' is already running. Use am_status(instance='{instance}')."}
+    if am.is_up_running(instance) or am.stack_running(instance):
+        return {"status": "already_running", "instance": instance,
+                "project": am.project_for(instance),
+                "message": f"AM instance '{instance}' is already running (project {am.project_for(instance)}). "
+                           f"Starting it again would RECREATE its containers. Inspect with "
+                           f"am_status(instance='{instance}'), stop with am_down(instance='{instance}'), "
+                           "or run a SECOND stack as a named instance."}
 
     docker_err = runner.docker_running_error()
     if docker_err:
@@ -1297,7 +1308,11 @@ def stack_preflight(kind: str = "apim", version: str = "latest", variant: str = 
     anything already holds them. Returns a structured recommendation so you can ask the
     user which path they want BEFORE launching:
       * status "clear"    → ports free; use the returned `start` option.
-      * status "conflict" → ports held; present the user with `down_conflicting` (free
+      * status "running"  → the target 'default' stack is ALREADY UP (its own containers
+        hold the ports). Do NOT start on canonical ports — it would recreate them. Offer
+        `inspect` / `down_first` / `coexist`. (Detected by running containers, so a dead
+        launcher process can't mask a live stack.)
+      * status "conflict" → ports held by ANOTHER stack; present `down_conflicting` (free
         the ports by downing the other stack) OR `coexist` (run the new stack alongside
         as a named instance on shifted ports), and let them choose.
 
@@ -1344,6 +1359,30 @@ def stack_preflight(kind: str = "apim", version: str = "latest", variant: str = 
         conflicts = [holder] if holder else []
         can_coexist, up_tool, up_base = True, "am_up", {"version": version}
         coexist_ports, license_note = None, None
+
+    # Is the TARGET 'default' stack ALREADY RUNNING? detect_conflicts/conflict_on skip the
+    # target project's own ports (to allow an idempotent re-up), so a genuinely-running
+    # default stack would otherwise read as "clear" — and starting on canonical ports would
+    # RECREATE its containers out from under the user. Container-based check, so a dead
+    # launcher PID can't mask a live stack.
+    target_running = apim.stack_running(variant, "default") if kind == "apim" else am.stack_running("default")
+    if target_running:
+        project = apim.project_for(variant, "default") if kind == "apim" else am.project_for("default")
+        opts = {"inspect": {"tool": f"{kind}_status", "args": {}},
+                "down_first": {"tool": f"{kind}_down", "args": {}}}
+        if can_coexist:
+            opts["coexist"] = {"tool": up_tool, "args": {**up_base, "instance": "b"},
+                               "ports": coexist_ports or "next free port"}
+        return {
+            "status": "running", "kind": kind, "resolved_version": resolved,
+            "variant": variant if kind == "apim" else None, "ports": ports, "project": project,
+            "message": (
+                f"the {kind} 'default' stack is ALREADY RUNNING on the canonical ports (project "
+                f"{project}). Do NOT start on canonical ports — it would RECREATE its containers. "
+                f"Inspect it ({kind}_status), stop it first ({kind}_down), or run a SECOND stack as a "
+                "named instance (coexist)."),
+            "options": opts,
+        }
 
     if not conflicts:
         return {

@@ -522,6 +522,12 @@ def is_tracked(instance: str = "default") -> bool:
     return _rec_for(instance) is not None
 
 
+def stack_running(variant: str = "default", instance: str = "default") -> bool:
+    """Whether this instance's compose project has RUNNING containers (container-based,
+    not launcher-PID-based). The safe 'is it already up?' check for preflight/up."""
+    return bool(runner.project_running_containers(project_for(variant, instance)))
+
+
 def is_up_running(instance: str = "default") -> bool:
     proc = _procs.get(instance)
     if proc is not None:

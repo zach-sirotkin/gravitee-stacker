@@ -376,6 +376,23 @@ def tail_file(path: Path, lines: int) -> str:
     return "\n".join(content[-lines:])
 
 
+def project_running_containers(project: str) -> list[str]:
+    """Names of RUNNING containers in a compose project, by docker label — the
+    authoritative 'is this stack up?' signal.
+
+    Independent of the tracked launcher process (which exits the moment `up -d`
+    returns, so PID-liveness reports a genuinely-running stack as down) AND of the
+    compose -f files. Used so preflight/up never treat an already-running stack as
+    absent and recreate its containers out from under the user.
+    """
+    r = subprocess.run(
+        ["docker", "ps", "--filter", f"label=com.docker.compose.project={project}",
+         "--filter", "status=running", "--format", "{{.Names}}"],
+        capture_output=True, text=True, timeout=15,
+    )
+    return [n for n in r.stdout.split() if n] if r.returncode == 0 else []
+
+
 def pid_alive(pid: Optional[int]) -> bool:
     if not pid:
         return False

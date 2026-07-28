@@ -4,6 +4,23 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-07-23
+
+### Fixed
+- **Data-loss-class bug: `stack_preflight` could report "clear" for ports held by an
+  already-running stack**, and `apim_up`/`am_up` could then recreate its gateway +
+  management-api out from under the user. Two root causes, both "is it up?" answered by
+  the wrong signal:
+  - `detect_conflicts`/`conflict_on` deliberately skip ports held by the *target's own*
+    project (to allow idempotent re-up), so a running `default` stack read as no-conflict
+    → "clear".
+  - the up-guards used `is_up_running`, which tracks the detached `up -d` launcher process
+    — dead the moment launch completes — so a genuinely-running stack read as absent.
+  Fix: a container-based `runner.project_running_containers()` (docker label + running
+  status) is now the authoritative check. `stack_preflight` returns a new **`running`**
+  status (with `inspect` / `down_first` / `coexist` options) when the target stack is up,
+  and the `apim_up`/`am_up` guards refuse with `already_running` (never recreate).
+
 ## [0.7.0] — 2026-07-22
 
 ### Added

@@ -191,6 +191,12 @@ def conflict_on(port: int, instance: str = "default") -> Optional[dict]:
     return None
 
 
+def stack_running(instance: str = "default") -> bool:
+    """Whether this instance's compose project has RUNNING containers (container-based,
+    not launcher-PID-based) — the safe 'is it already up?' check for preflight/up."""
+    return bool(runner.project_running_containers(project_for(instance)))
+
+
 def down_project(project: str) -> dict:
     p = subprocess.run(["docker", "compose", "-p", project, "down"],
                        env=runner._child_env(), capture_output=True, text=True, timeout=180)
