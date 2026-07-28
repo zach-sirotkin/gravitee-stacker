@@ -4,6 +4,16 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — 2026-07-28
+
+### Fixed
+- **Fresh installs broke on `mcp` 2.0.** The dependency was unpinned (`mcp>=1.28.0`); mcp
+  2.0.0 removed `mcp.server.fastmcp` (which this server imports), so a clean
+  `pip install` / `pipx install` (and every CI `test` job) resolved 2.0 and failed at
+  import with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. Capped at
+  `mcp>=1.28.0,<2`. (Existing editable dev installs already on mcp 1.x were unaffected —
+  only fresh resolutions hit it.)
+
 ## [0.7.1] — 2026-07-23
 
 ### Fixed

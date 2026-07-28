@@ -1,6 +1,6 @@
 [project]
 name = "gravitee-stacker"
-version = "0.7.1"
+version = "0.7.2"
 description = "MCP server that stands up and manages local Gravitee Docker stacks (APIM incl. native-Kafka, Access Management, the Gamma demo, and any official quick-setup config) — any version, multiple at once."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,10 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
-    "mcp>=1.28.0",
+    # Cap at <2: mcp 2.0 removed `mcp.server.fastmcp` (which this server imports). Without
+    # the cap a fresh install resolves 2.0 and fails at import. Revisit if migrating to the
+    # mcp 2.x server API.
+    "mcp>=1.28.0,<2",
 ]
 
 [project.urls]
