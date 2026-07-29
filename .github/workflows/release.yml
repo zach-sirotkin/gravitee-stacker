@@ -1,9 +1,8 @@
 name: Release
 
-# Private distribution: on a version tag, build the wheel + sdist and attach them to a
-# GitHub Release. On a PRIVATE repo the release (and its assets) are visible only to
-# people with repo access — this is NOT published to PyPI. Cut a release with:
-#   git tag v0.4.1 && git push origin v0.4.1
+# Distribution: on a version tag, build the wheel + sdist and attach them to a GitHub
+# Release. NOT published to PyPI — install from git or the release wheel. Cut a release:
+#   git tag v0.7.3 && git push origin v0.7.3
 
 on:
   push:
@@ -42,7 +41,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "$GITHUB_REF_NAME" \
-            --notes "Private release — install with:
+            --notes "Install with:
           \`\`\`
           pipx install \"git+https://github.com/${{ github.repository }}@${GITHUB_REF_NAME}\"
           \`\`\`

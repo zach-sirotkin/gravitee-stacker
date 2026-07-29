@@ -21,8 +21,10 @@ launch any release on command, run several at once, no hand-rolled compose files
 - **Any official quick-setup** (`quicksetup_*`) — fetch and run any of the ~two dozen
   upstream `docker/quick-setup/*` configs (mongodb, postgresql, keycloak, native-kafka,
   opensearch, prometheus, …) on demand, with known-gotcha auto-fixes.
-- **Gamma demo** (`stack_*`) — a thin wrapper over the Gamma SDK's `docker/run.sh`;
-  needs the SDK repo + registry access (below).
+- **Gamma demo** (`stack_*`) — **⚠️ Gravitee-internal only.** A thin wrapper over the
+  Gamma SDK's `docker/run.sh`; needs the **private** `gravitee-gamma-modules-sdk` repo and
+  Gravitee's private registry, so it won't work outside Gravitee. Everything else above runs
+  on public resources.
 
 APIM and AM support **named instances** so you can run multiple stacks of the same kind
 at once (generalized coexist) — feature ports shift with the instance, so composed stacks
@@ -33,7 +35,7 @@ ports, and offers down-vs-coexist on a conflict.
 
 **Requirements:** Docker Desktop (running), Python 3.10+, macOS or Linux.
 
-**1. Install** (the repo is private — you need access; ask Zach to be added)
+**1. Install**
 ```bash
 git clone https://github.com/zach-sirotkin/gravitee-stacker.git
 cd gravitee-stacker
@@ -57,8 +59,8 @@ what's ready and what's missing for each stack.
 | Thing | Where | Needed for |
 | ----- | ----- | ---------- |
 | **Gravitee license** (optional) | `~/.gravitee/license.key` — `mkdir -p ~/.gravitee && cp <your-license>.key ~/.gravitee/license.key` | Enterprise features on APIM. Without it APIM runs in **OSS mode**. Auto-detected; no config needed. |
-| **Gamma SDK repo** | Clone `gravitee-gamma-modules-sdk`, then set `GAMMA_STACK_DIR` to its path (default `~/gravitee-gamma-modules-sdk`) | The **Gamma** stack only (`stack_*`). APIM doesn't need it. |
-| **Registry login** | `az acr login --name graviteeio` (or `REGISTRY=graviteeio` for the public hub) | The **Gamma** stack only — its images are on Gravitee's private registry. |
+| **Gamma SDK repo** *(Gravitee-internal)* | Clone the private `gravitee-gamma-modules-sdk`, then set `GAMMA_STACK_DIR` to its path (default `~/gravitee-gamma-modules-sdk`) | The **Gamma** stack only (`stack_*`) — needs Gravitee access. APIM/AM/quick-setups/plugins don't. |
+| **Registry login** *(Gravitee-internal)* | `az acr login --name graviteeio` | The **Gamma** stack only — its images are on Gravitee's private registry. |
 
 > APIM images are public (`graviteeio/apim-*`) — no login needed. A license is optional.
 > So if you only want APIM, step 4 is the whole setup.
@@ -80,7 +82,12 @@ The stack families listed above, tool by tool. Two meta tools first:
 (3) on a conflict, offer **down the other stack** vs **coexist** (a named instance); then
 `apim_up`/`am_up`.
 
-### Gamma stack (`stack_*`)
+### Gamma stack (`stack_*`) — Gravitee-internal
+
+> **⚠️ Gravitee employees only.** These tools wrap `run.sh` from the **private**
+> `gravitee-gamma-modules-sdk` repo and pull images from Gravitee's private registry — they
+> won't work without Gravitee access. The rest of the tool (APIM, AM, quick-setups,
+> plugins) needs none of this and runs on public images/resources.
 
 | Tool                     | What it does                                                                                 |
 | ------------------------ | -------------------------------------------------------------------------------------------- |
@@ -388,14 +395,14 @@ mid-startup failure.
 
 ## Install / run
 
-> **Private tool — Gravitee only.** This repo is private; it's shared with Gravitee
-> people, not published to PyPI or made public. You need read access to the repo (ask
-> Zach). Colleagues with access can install a pinned version straight from git without
-> cloning:
+> **Public, but not on PyPI.** Install a pinned version straight from git (no clone
+> needed), or grab the wheel from a [GitHub Release](https://github.com/zach-sirotkin/gravitee-stacker/releases):
 > ```bash
-> pipx install "git+https://github.com/zach-sirotkin/gravitee-stacker@v0.5.0"
+> pipx install "git+https://github.com/zach-sirotkin/gravitee-stacker@v0.7.2"
 > ```
-> or grab the wheel attached to the matching [GitHub Release](https://github.com/zach-sirotkin/gravitee-stacker/releases).
+> Use **≥ v0.7.2** — earlier wheels don't cap the `mcp` dependency and break on a fresh
+> install now that `mcp` 2.0 is out. (The `stack_*` Gamma tools are Gravitee-internal — see
+> above; everything else works for anyone.)
 
 For local development, clone and install editable:
 
