@@ -1,6 +1,6 @@
 [project]
 name = "gravitee-stacker"
-version = "0.8.0"
+version = "0.8.1"
 description = "MCP server that stands up and manages local Gravitee Docker stacks (APIM incl. native-Kafka, Access Management, the Gamma demo, and any official quick-setup config) — any version, multiple at once."
 readme = "README.md"
 requires-python = ">=3.10"

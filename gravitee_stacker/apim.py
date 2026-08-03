@@ -56,8 +56,38 @@ _FEATURE_PORTS = {
     "prometheus": [("APIM_PROMETHEUS_PORT", 9090)],
     "redis-rate-limit": [],
     "debug-logging": [],
-    "alert-engine": [],  # AE is internal-only (gateway reaches it on the storage net)
+    "alert-engine": [("APIM_AE_MGMT_PORT", 18072)],  # AE node/management API (/_node/*)
 }
+
+# Feature-level gotchas surfaced on apim_up (when the feature is layered on) + referenced
+# by quicksetup for the AE case. Curated from live end-to-end testing.
+FEATURE_GOTCHAS = {
+    "alert-engine": {
+        "severity": "warning",
+        "summary": "After a FRESH-VOLUME start (down -v then up, or first-ever up), the "
+                   "gateway must be RESTARTED once the stack is healthy or alerts silently "
+                   "never fire. On a cold boot against an empty Mongo the gateway resolves "
+                   "installation=null (the mgmt-api hasn't written the installation record "
+                   "yet) and caches it for the life of the process. Every console alert "
+                   "carries an auto-injected `installation EQUALS <uuid>` filter, so every "
+                   "REQUEST event is dropped at the filter stage — with NO error anywhere: "
+                   "traffic flows, analytics populate, events reach AE typed REQUEST, the "
+                   "trigger registers, and alert history just stays empty.",
+        "fix": "Once healthy: apim_alert_engine_fix(instance) (restarts apim-gateway), or "
+               "`docker compose -p <project> restart apim-gateway`. Confirm gateway "
+               "NODE_HEARTBEAT events carry a non-null installation. NB: 'Events successfully "
+               "sent.' in the gateway log is only 5s node-heartbeat traffic — it proves "
+               "transport, NOT that request events flow. Real signals: gateway "
+               "'processor-alert in processor chain post-platform'; AE 'EventListenerVerticle "
+               "- Received alert event ... type=REQUEST' → DampeningState → "
+               "NotificationServiceImpl → 'Webhook sent!'.",
+    },
+}
+
+
+def feature_gotcha(name: str) -> Optional[dict]:
+    g = FEATURE_GOTCHAS.get(name)
+    return {"feature": name, **g} if g else None
 
 # compose service name -> (coexist port env var, canonical default host port, url role)
 _ROLE = {
@@ -315,6 +345,8 @@ def plan_ports(offset: int, variant: str = "default", features=None) -> dict:
     urls = {role: eff[svc][0] for svc, (_v, _d, role) in _ROLE.items() if svc in eff}
     if "prometheus" in features and "apim-prometheus" in eff:
         urls["prometheus"] = eff["apim-prometheus"][0]
+    if "alert-engine" in features and "apim-alert-engine" in eff:
+        urls["alert-engine node API"] = eff["apim-alert-engine"][0]
     return {"port_env": port_env, "ports": ports, "urls": urls}
 
 
@@ -494,6 +526,47 @@ def recreate_gateway(instance: str = "default", timeout: int = 300) -> dict:
     )
     return {"ok": p.returncode == 0, "returncode": p.returncode,
             "output": ((p.stdout or "") + (p.stderr or ""))[-1500:]}
+
+
+def volumes_fresh(variant: str = "default", instance: str = "default") -> bool:
+    """True if this instance's data volumes don't exist yet (a fresh/cold start). Check it
+    BEFORE `up`. Used to warn that alert-engine needs a post-healthy gateway restart on a
+    cold Mongo (else the gateway caches installation=null and alerts never fire)."""
+    proj = project_for(variant, instance)
+    r = subprocess.run(["docker", "volume", "ls", "-q", "--filter", f"name={proj}_apim-mongo-data"],
+                       capture_output=True, text=True, timeout=15)
+    return not (r.returncode == 0 and r.stdout.strip())
+
+
+def restart_gateway(instance: str = "default", timeout: int = 150) -> dict:
+    """Restart apim-gateway (NOT recreate) — re-resolves the installation id, which fixes
+    the alert-engine fresh-volume bug where the gateway cached installation=null."""
+    rec = _rec_for(instance)
+    if rec is None:
+        return {"ok": False, "error": f"instance '{instance}' is not tracked/running."}
+    variant = rec.variant or "default"
+    features = normalize_features(rec.features)
+    args = compose_args(variant, instance, rec.license, features)
+    p = subprocess.run(
+        ["docker", "compose", *args, "restart", "apim-gateway"],
+        cwd=str(apim_state_dir()),
+        env=_env(rec.version or "latest", None, variant, rec.license, features, instance),
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return {"ok": p.returncode == 0, "returncode": p.returncode,
+            "output": ((p.stdout or "") + (p.stderr or ""))[-1000:]}
+
+
+def ae_mgmt_url(instance: str = "default") -> Optional[str]:
+    """Host URL for the AE node/management API of a tracked alert-engine instance."""
+    rec = _rec_for(instance)
+    if rec is None or "alert-engine" not in normalize_features(rec.features):
+        return None
+    try:
+        port = plan_ports(rec.offset or 0, "default", rec.features)["urls"].get("alert-engine node API")
+    except (RuntimeError, ValueError):
+        port = None
+    return f"http://localhost:{port}" if port else None
 
 
 def run_down(timeout: int, variant: str = "default", instance: str = "default", features=None) -> dict:

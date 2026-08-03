@@ -32,6 +32,15 @@ services:
     image: graviteeio/ae-engine:${AE_VERSION:-3}
     restart: always
     networks: [storage]
+    environment:
+      # AE's node/management API binds to 127.0.0.1 by default → publishing the port hits
+      # nothing. Bind it to all interfaces so ae_log_level / ae_trigger_dump can reach it.
+      - gravitee_services_core_http_host=0.0.0.0
+    ports:
+      # AE node/management API — ALL endpoints are under /_node (admin/adminadmin), e.g.
+      # /_node/logging, /_node/triggers. Used by ae_log_level / ae_trigger_dump. Shifts
+      # with the instance offset for coexist.
+      - "${APIM_AE_MGMT_PORT:-18072}:18072"
     volumes:
       - ${APIM_LICENSE}:/opt/graviteeio-alert-engine/license/license.key:ro
     # AE's image healthcheck probes :8072 and gets 401 → the container would report

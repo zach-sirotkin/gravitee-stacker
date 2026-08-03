@@ -46,7 +46,7 @@ jobs:
           from gravitee_stacker.server import mcp
           from gravitee_stacker import apim, am
           names = sorted(t.name for t in asyncio.run(mcp.list_tools()))
-          assert len(names) >= 33, names
+          assert len(names) >= 36, names
           for req in ("apim_up", "am_up", "stack_up", "stack_preflight",
                       "doctor", "apim_list", "am_list",
                       "quicksetup_list", "quicksetup_up", "quicksetup_down",
@@ -65,5 +65,5 @@ jobs:
           python -m build --wheel
           python -m venv /tmp/fresh
           /tmp/fresh/bin/python -m pip install dist/*.whl
-          /tmp/fresh/bin/python -c "import asyncio; from gravitee_stacker.server import mcp; assert len(asyncio.run(mcp.list_tools())) >= 33; print('fresh-venv install OK')"
+          /tmp/fresh/bin/python -c "import asyncio; from gravitee_stacker.server import mcp; assert len(asyncio.run(mcp.list_tools())) >= 36; print('fresh-venv install OK')"
           test -x /tmp/fresh/bin/gravitee-stacker

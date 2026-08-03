@@ -7,6 +7,10 @@ Thin wrapper over docker/run.sh. Tools:
 
 from __future__ import annotations
 
+import base64
+import json
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
@@ -550,6 +554,18 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     if variant == "kafka" and mem is not None and mem < 15.5:
         warnings.append(f"Docker has ~{mem:.1f} GiB; the Kafka stack wants >= 16 GiB.")
 
+    # Feature gotchas (surfaced so an assistant sees them). For alert-engine on a FRESH
+    # volume set specifically, the gateway must be restarted after healthy or alerts never
+    # fire — check volume freshness BEFORE `up` creates them.
+    feature_gotchas = [g for f in features if (g := apim.feature_gotcha(f))]
+    fresh_volumes = apim.volumes_fresh(variant, instance)
+    if "alert-engine" in features and fresh_volumes:
+        warnings.append(
+            "ALERT-ENGINE + FRESH VOLUMES: once the stack is healthy you MUST restart the "
+            "gateway — apim_alert_engine_fix(instance) — or alerts SILENTLY never fire "
+            "(the gateway caches installation=null on a cold Mongo, and every alert's "
+            "auto-injected 'installation EQUALS' filter then drops every event).")
+
     offset = apim.allocate_offset(variant, instance, features)
     if offset is None:
         return {"status": "blocked",
@@ -602,6 +618,8 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
         "version": resolved,
         "variant": variant,
         "features": features,
+        "feature_gotchas": feature_gotchas or None,
+        "fresh_volumes": fresh_volumes,
         "instance": instance,
         "project": apim.project_for(variant, instance),
         "mode": "coexist" if offset else "canonical",
@@ -724,6 +742,83 @@ def apim_latest_version() -> dict:
         return {"status": "error", "message": err}
     return {"status": "ok", "latest_version": resolved,
             "repo": "https://github.com/gravitee-io/gravitee-api-management"}
+
+
+# ── Alert Engine helpers (for the alert-engine feature) ───────────────────────
+def _ae_node(instance: str, path: str, method: str = "GET", body: dict = None) -> dict:
+    """Call the AE node/management API (all endpoints under /_node, basic auth
+    admin/adminadmin). Returns {status, http_status, body}."""
+    base = apim.ae_mgmt_url(instance)
+    if not base:
+        return {"status": "error",
+                "message": f"instance '{instance}' has no running alert-engine feature "
+                           "(bring it up with apim_up(features=['alert-engine']))."}
+    url = f"{base}/_node/{path.lstrip('/')}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", "Basic " + base64.b64encode(b"admin:adminadmin").decode())
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            text = r.read().decode(errors="replace")
+            code = r.status
+    except urllib.error.HTTPError as e:
+        text, code = e.read().decode(errors="replace"), e.code
+    except (urllib.error.URLError, OSError) as e:
+        return {"status": "error",
+                "message": f"could not reach AE node API at {url}: {e}. If the stack was "
+                           "just started, give it a moment; if it persists, recreate the "
+                           "alert-engine service so it picks up gravitee_services_core_http_host=0.0.0.0."}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = text
+    return {"status": "ok" if code < 400 else "error", "http_status": code, "url": url, "body": parsed}
+
+
+@mcp.tool()
+def apim_alert_engine_fix(instance: str = "default") -> dict:
+    """Restart the gateway of an alert-engine instance — the fix for the fresh-volume bug
+    where alerts silently never fire.
+
+    On a cold boot against an empty Mongo the gateway caches installation=null (the mgmt-api
+    hadn't written the installation record yet); every console alert's auto-injected
+    `installation EQUALS <uuid>` filter then drops every REQUEST event. Restarting the
+    gateway re-resolves the (now-written) installation id. Run this ONCE after the stack is
+    healthy on a fresh-volume alert-engine deploy."""
+    res = apim.restart_gateway(instance)
+    if not res.get("ok") and res.get("error"):
+        return {"status": "error", "instance": instance, "message": res["error"]}
+    return {"status": "ok" if res.get("ok") else "error", "instance": instance,
+            "restarted": "apim-gateway", "returncode": res.get("returncode"),
+            "next": "Give the gateway ~30s, then confirm: apim_logs('apim-gateway', instance) "
+                    "should show NODE_HEARTBEAT with a non-null installation, and a matching "
+                    "alert now fires (AE log 'Received alert event ... type=REQUEST' → 'Webhook sent!')."}
+
+
+@mcp.tool()
+def ae_log_level(instance: str = "default", level: str = "DEBUG",
+                 logger: str = "com.graviteesource.ae") -> dict:
+    """Set an Alert Engine logger's level at runtime (no restart) via /_node/logging.
+
+    Handy for diagnosing why an alert doesn't fire. Default flips the whole AE package to
+    DEBUG. WARNING (per the AE node API): an UNPARSEABLE level string resolves to null and
+    silently RESETS that logger rather than erroring — pass a valid level (DEBUG/INFO/WARN…).
+    Returns the full current logger→level map."""
+    return _ae_node(instance, "logging", method="POST", body={logger: level})
+
+
+@mcp.tool()
+def ae_trigger_dump(instance: str = "default", trigger_id: str = "") -> dict:
+    """Dump the alert triggers AS THE ENGINE HOLDS THEM (/_node/triggers[/<id>]).
+
+    Diffing a trigger's `filters` against a REQUEST event's `properties` is the ONLY way to
+    catch a silent filter rejection (e.g. the `installation EQUALS <uuid>` filter dropping
+    every event when the gateway cached installation=null — see apim_alert_engine_fix).
+    Pass `trigger_id` for one trigger, or omit for all."""
+    path = f"triggers/{trigger_id}" if trigger_id else "triggers"
+    return _ae_node(instance, path)
 
 
 # ── APIM plugin management (catalog + bundled + install) ──────────────────────
@@ -1142,9 +1237,16 @@ def quicksetup_list(version: str = "latest") -> dict:
     gotchas = {n: {"severity": quicksetup.GOTCHAS[n]["severity"],
                    "summary": quicksetup.GOTCHAS[n]["summary"]}
                for n in names if n in quicksetup.GOTCHAS}
-    return {"status": "ok", "version": resolved, "count": len(names),
-            "configs": names, "running_locally": quicksetup.known_configs(),
-            "known_gotchas": gotchas,
+    out = {"status": "ok", "version": resolved, "count": len(names),
+           "configs": names, "running_locally": quicksetup.known_configs(),
+           "known_gotchas": gotchas}
+    if "ee-with-alert-engine" in names:
+        # The curated alert-engine feature is the working alternative; carry its gotcha too.
+        out["alert_engine_feature"] = {
+            "use_instead": "apim_up(features=['alert-engine'])  # works end-to-end vs the broken quick-setup",
+            "gotcha": apim.feature_gotcha("alert-engine"),
+        }
+    return {**out,
             "note": "Run one with quicksetup_up(name). One at a time — the raw upstream "
                     "composes hardcode ports/container names, so they can't coexist; to "
                     "coexist or COMBINE capabilities (e.g. Kafka + Prometheus + Redis) use "

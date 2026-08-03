@@ -129,7 +129,18 @@ combine cleanly and mix freely:
 | `prometheus` | a Prometheus that scrapes the gateway's metrics endpoint | Prometheus UI on **:9090** |
 | `redis-rate-limit` | points the gateway's rate-limit store at a bundled Redis | internal (no host port) |
 | `debug-logging` **(on by default)** | verbose `DEBUG` logs from the gateway + management-api (`io.gravitee` at DEBUG, via a bundled `logback-debug.xml`) | via `apim_logs` |
-| `alert-engine` **(EE license)** | Gravitee Alert Engine wired to the gateway **container-to-container** on the shared network (`ws_discovery=false`) — the fix the upstream `ee-with-alert-engine` quick-setup lacks, where AE is isolated and never receives events | internal; create alerts in the console |
+| `alert-engine` **(EE license)** | Gravitee Alert Engine wired to the gateway **container-to-container** on the shared network (`ws_discovery=false`) — the fix the upstream `ee-with-alert-engine` quick-setup lacks, where AE is isolated and never receives events. Verified end-to-end (evaluation + notification + delivery). | node API on **:18072** (`/_node/*`); create alerts in the console |
+
+**Alert Engine — one gotcha to know.** After a **fresh-volume** start, restart the gateway
+once the stack is healthy — **`apim_alert_engine_fix(instance)`** — or alerts *silently*
+never fire. On a cold Mongo the gateway caches `installation=null` (the mgmt-api hasn't
+written the installation record yet), and every console alert's auto-injected `installation
+EQUALS <uuid>` filter then drops every event, with no error anywhere. `apim_up` warns about
+this when `alert-engine` is layered on fresh volumes. For debugging: **`ae_log_level`**
+(flip an AE logger to DEBUG via `/_node/logging`) and **`ae_trigger_dump`** (`/_node/triggers`
+— diff a trigger's `filters` against the event `properties` to catch a silent rejection).
+Note: `Events successfully sent.` in the gateway log is just node-heartbeat traffic — it
+does **not** prove request events are flowing.
 
 **Custom / experimental features** live **outside** the package: drop an
 `apim-feature-<name>.yml` in `~/.gravitee/stacker-features/` (override with

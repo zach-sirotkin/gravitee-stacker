@@ -4,6 +4,29 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-08-03
+
+### Added
+- **Alert Engine ops tooling** (from live end-to-end testing that confirmed the feature
+  works — evaluation + notification + webhook delivery — on APIM 4.12.13 + AE 3.0.2):
+  - `apim_alert_engine_fix(instance)` — restarts the gateway to fix the **fresh-volume
+    bug**: on a cold Mongo the gateway caches `installation=null` (the mgmt-api hasn't
+    written the installation record yet), so every console alert's auto-injected
+    `installation EQUALS <uuid>` filter silently drops every REQUEST event — no error, alert
+    history just stays empty. `apim_up` now detects fresh volumes + alert-engine and warns;
+    a `FEATURE_GOTCHAS` entry surfaces on `apim_up`/`quicksetup_list`.
+  - `ae_log_level` / `ae_trigger_dump` — drive the AE node API (`/_node/logging`,
+    `/_node/triggers`) so you can flip AE to DEBUG and diff a trigger's `filters` vs an
+    event's `properties` (how the fresh-volume bug was found). The overlay now publishes the
+    AE node API (18072, offset-aware) and binds it to `0.0.0.0` (AE defaults to 127.0.0.1).
+
+### Fixed
+- **False readiness signal corrected.** `Events successfully sent.` in the gateway log is
+  only 5s node-heartbeat/monitor traffic — it does NOT prove request events reach AE (the
+  earlier v0.8.0 note claimed it did). Real signals documented: gateway `processor-alert in
+  processor chain post-platform`; AE `Received alert event ... type=REQUEST` →
+  `DampeningState` → `Fire a new notification` → `Webhook sent!`.
+
 ## [0.8.0] — 2026-08-03
 
 ### Added
