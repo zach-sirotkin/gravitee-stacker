@@ -460,6 +460,10 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
                              (Redis stays internal — no host port).
       * "debug-logging"    — verbose DEBUG logs from the gateway + management-api
                              (io.gravitee at DEBUG). **ON BY DEFAULT** — see below.
+      * "alert-engine"     — Gravitee Alert Engine wired to the gateway container-to-
+                             container (fixes what the ee-with-alert-engine quick-setup
+                             can't). **Requires an EE license.** Alerts are still created
+                             manually in the console.
     They combine freely, e.g. features=["prometheus","redis-rate-limit"], and on the
     kafka base too — so `variant="kafka", features=[...]` is a Kafka stack with those
     add-ons. (These are the curated, coexist-safe equivalent of the one-shot
@@ -534,6 +538,11 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
         return {"status": "blocked",
                 "message": ("the kafka variant needs an EE license with the Kafka Gateway "
                             "feature — none found. Drop it at ~/.gravitee/license.key, set "
+                            "APIM_LICENSE, or pass license=/path/to/license.key.")}
+    if apim.features_require_license(features) and not license_path:
+        return {"status": "blocked",
+                "message": (f"feature(s) {[f for f in features if f in apim.FEATURES_REQUIRING_LICENSE]} "
+                            "need an EE license — none found. Drop it at ~/.gravitee/license.key, set "
                             "APIM_LICENSE, or pass license=/path/to/license.key.")}
 
     warnings = []

@@ -4,6 +4,37 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-08-03
+
+### Added
+- **`alert-engine` feature** — Gravitee Alert Engine on ANY curated APIM stack (not just
+  the quick-setup). Adds an `apim-alert-engine` service on the shared `storage` network and
+  wires the gateway + management-api AE connector to it **container-to-container**
+  (`ws_discovery=false`, endpoint `http://apim-alert-engine:8072/`). This is exactly what
+  the upstream `ee-with-alert-engine` quick-setup can't do — there AE has no `networks:`
+  key (isolated on the default net) and `ws_discovery=true` makes the gateway chase AE's
+  announced, unroutable container IP, so events never arrive. **Requires an EE license**
+  (gated). AE image version auto-tracks the gateway's bundled `alert-engine-connectors-ws`
+  (APIM 4.12→AE 3, 4.11→2.3, ≤4.10→2; override with `AE_VERSION`). The AE image's false-401
+  healthcheck is disabled so status isn't stuck `partial`. **Verified live:** the gateway's
+  AE connector logs `Events successfully sent.` continuously with a stable channel — the
+  event stream the quick-setup never established.
+- **External feature-overlay dir** — custom/experimental features now live OUTSIDE the
+  package: an `apim-feature-<name>.yml` in `~/.gravitee/stacker-features/` (or
+  `APIM_FEATURES_DIR`) is usable via `apim_up(features=["<name>"])`, and takes precedence
+  over a bundled overlay of the same name. So you never author experiments in the installed
+  package (which is what let scratch files accumulate there).
+
+### Changed
+- **Package hygiene** — removed accumulated experimental scratch (ticket-numbered configs,
+  custom overlays, otel-collector configs) from the `gravitee_stacker/` package dir; the
+  wheel now ships only real tool assets. (Moved to `~/gravitee/stacker-scratch/`, not
+  deleted.)
+- **`ee-with-alert-engine` gotcha note rewritten** — it wrongly claimed the gateway
+  "streams events" to AE; in fact AE never receives events in that config (root-caused to
+  the missing network + `ws_discovery=true`). Now marked `broken` for AE testing, pointing
+  at `apim_up(features=["alert-engine"])` instead.
+
 ## [0.7.3] — 2026-07-28
 
 ### Changed

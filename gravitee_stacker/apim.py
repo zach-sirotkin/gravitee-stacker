@@ -40,7 +40,10 @@ VARIANTS = ("default", "kafka")
 # base compose (OSS or kafka). Each adds a capability's service(s) + gateway env. They
 # attach to the `storage` network and reach apim-gateway by name. Coexist works because
 # the base + overlays are all port-parameterized (see _FEATURE_PORTS).
-FEATURES = ("prometheus", "redis-rate-limit", "debug-logging")
+FEATURES = ("prometheus", "redis-rate-limit", "debug-logging", "alert-engine")
+
+# Features that need an EE license (like the kafka variant). alert-engine (AE) is EE.
+FEATURES_REQUIRING_LICENSE = ("alert-engine",)
 
 # Features layered onto EVERY deploy unless opted out. Override machine-wide with
 # APIM_DEFAULT_FEATURES (comma-separated; set it empty to disable all defaults), or
@@ -53,6 +56,7 @@ _FEATURE_PORTS = {
     "prometheus": [("APIM_PROMETHEUS_PORT", 9090)],
     "redis-rate-limit": [],
     "debug-logging": [],
+    "alert-engine": [],  # AE is internal-only (gateway reaches it on the storage net)
 }
 
 # compose service name -> (coexist port env var, canonical default host port, url role)
@@ -68,13 +72,49 @@ def requires_license(variant: str) -> bool:
     return variant == "kafka"
 
 
+def features_require_license(features) -> bool:
+    return any(f in FEATURES_REQUIRING_LICENSE for f in normalize_features(features))
+
+
+def ae_version_for(apim_version: str) -> str:
+    """AE engine image tag tracking the gateway's bundled alert-engine-connectors-ws:
+    APIM 4.12+ → connector 3.x → AE '3'; 4.11 → 2.3.x → '2.3'; ≤4.10 → 2.x → '2'.
+    Uses the floating major/minor tags so it auto-updates."""
+    m = re.match(r"(\d+)\.(\d+)", apim_version or "")
+    if not m:
+        return "3"
+    mm = (int(m.group(1)), int(m.group(2)))
+    if mm >= (4, 12):
+        return "3"
+    if mm == (4, 11):
+        return "2.3"
+    return "2"
+
+
 def supports_instances(variant: str) -> bool:
     """The kafka variant is single-instance (fixed *.kafka.local cert + broker ports)."""
     return variant != "kafka"
 
 
+def features_dir() -> Path:
+    """Where USER/experimental feature overlays live — OUTSIDE the package, so custom
+    features never pollute (or ship with) the tool. Override with APIM_FEATURES_DIR;
+    default ~/.gravitee/stacker-features/. Drop an `apim-feature-<name>.yml` here and use
+    it via apim_up(features=["<name>"]) — no need to touch the installed package."""
+    return Path(os.environ.get("APIM_FEATURES_DIR")
+                or Path.home() / ".gravitee" / "stacker-features").expanduser()
+
+
 def feature_compose(name: str) -> Path:
-    return _HERE / f"apim-feature-{name}.yml"
+    """Overlay file for a feature. A user overlay in features_dir() takes precedence over a
+    bundled one of the same name."""
+    external = features_dir() / f"apim-feature-{name}.yml"
+    return external if external.is_file() else _HERE / f"apim-feature-{name}.yml"
+
+
+def is_known_feature(name: str) -> bool:
+    """Built-in (in FEATURES) OR a user overlay present in features_dir()."""
+    return name in FEATURES or (features_dir() / f"apim-feature-{name}.yml").is_file()
 
 
 def normalize_features(features) -> list[str]:
@@ -109,8 +149,9 @@ def resolve_features(requested) -> list[str]:
 
 
 def unknown_features(features) -> list[str]:
-    """Unknown names in an already-resolved list (bare names, no '-' prefixes)."""
-    return [f for f in normalize_features(features) if f not in FEATURES]
+    """Unknown names in an already-resolved list (bare names, no '-' prefixes). A name is
+    known if it's built-in OR has a user overlay in features_dir()."""
+    return [f for f in normalize_features(features) if not is_known_feature(f)]
 
 
 # ── paths / project / env ─────────────────────────────────────────────────────
@@ -213,6 +254,13 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
         env["APIM_PROMETHEUS_CONFIG"] = str(_HERE / "prometheus.yml")
     if "debug-logging" in _feats:
         env["APIM_LOGBACK_DEBUG"] = str(_HERE / "logback-debug.xml")
+    if "alert-engine" in _feats:
+        # Pick the AE engine version to match the gateway's connector; and make sure
+        # APIM_LICENSE is defined (the overlay mounts it into AE) even on read paths that
+        # weren't passed a license_path — AE is EE, so a license is present at `up`.
+        env["AE_VERSION"] = os.environ.get("AE_VERSION") or ae_version_for(version)
+        if not env.get("APIM_LICENSE"):
+            env["APIM_LICENSE"] = resolve_license("")[0] or str(DEFAULT_LICENSE_PATH)
     if extra:
         env.update(extra)
     return env

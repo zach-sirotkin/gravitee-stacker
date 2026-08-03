@@ -129,6 +129,13 @@ combine cleanly and mix freely:
 | `prometheus` | a Prometheus that scrapes the gateway's metrics endpoint | Prometheus UI on **:9090** |
 | `redis-rate-limit` | points the gateway's rate-limit store at a bundled Redis | internal (no host port) |
 | `debug-logging` **(on by default)** | verbose `DEBUG` logs from the gateway + management-api (`io.gravitee` at DEBUG, via a bundled `logback-debug.xml`) | via `apim_logs` |
+| `alert-engine` **(EE license)** | Gravitee Alert Engine wired to the gateway **container-to-container** on the shared network (`ws_discovery=false`) — the fix the upstream `ee-with-alert-engine` quick-setup lacks, where AE is isolated and never receives events | internal; create alerts in the console |
+
+**Custom / experimental features** live **outside** the package: drop an
+`apim-feature-<name>.yml` in `~/.gravitee/stacker-features/` (override with
+`APIM_FEATURES_DIR`) and use it via `apim_up(features=["<name>"])`. A user overlay wins
+over a bundled one of the same name — so you never have to edit the installed package to
+try a feature.
 
 **Defaults.** `debug-logging` is layered onto **every** deploy (`apim.DEFAULT_FEATURES`) —
 local stacks are for debugging, so verbose logs are the useful default. Opt out per-deploy

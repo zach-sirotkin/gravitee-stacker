@@ -95,12 +95,20 @@ GOTCHAS = {
                "README's token URL /auth/realms/gio is stale; KC26 uses /realms/gio.",
     },
     "ee-with-alert-engine": {
-        "severity": "misleading",
-        "summary": "alert_engine works (gateway connects and streams events) but its docker "
-                   "healthcheck hits :8072 and gets 401, so it shows 'unhealthy' and the tool's "
-                   "overall stays 'partial' forever. Firing an actual alert is a manual console step.",
-        "fix": "Ignore the unhealthy flag; confirm via gateway log 'Channel is ready to send data "
-               "to Alert Engine'. No compose fix needed.",
+        "severity": "broken",
+        "summary": "NOT usable for end-to-end alert testing as shipped. alert_engine starts, the "
+                   "license is accepted, and it DOES register trigger definitions from the mgmt API "
+                   "(AE log 'Register trigger [...]') — but the gateway's event stream never reaches "
+                   "it: alerts never evaluate (alert HISTORY stays empty) and notifications never "
+                   "fire. Root cause: the alert_engine service has NO `networks:` key (it lands on "
+                   "the compose default net, isolated from storage/frontend), and "
+                   "ws_discovery=true makes the gateway follow AE's announced (unroutable) container "
+                   "IP after the host.docker.internal bootstrap. Its image healthcheck on :8072 also "
+                   "401s, so the container shows 'unhealthy' and overall stays 'partial'. (Verified "
+                   "on Gravitee Cloud with the same alert config → environmental, not a product bug.)",
+        "fix": "For real AE testing use the curated stack instead: apim_up(features=['alert-engine']) "
+               "— AE on the shared storage network + ws_discovery=false + a container endpoint, which "
+               "fixes the isolation the quick-setup can't. This raw config stays broken for AE.",
     },
     "prometheus": {
         "severity": "info",
