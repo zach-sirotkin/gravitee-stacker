@@ -566,6 +566,23 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
             "(the gateway caches installation=null on a cold Mongo, and every alert's "
             "auto-injected 'installation EQUALS' filter then drops every event).")
 
+    # Taking over an EXISTING (non-fresh) instance with a DIFFERENT version reuses its
+    # volumes — warn (esp. downgrades: an older mgmt-api against newer Mongo data).
+    prev_version = apim.current_version(instance)
+    version_change = None
+    if prev_version and not fresh_volumes and prev_version != resolved:
+        version_change = {"was": prev_version, "now": resolved,
+                          "downgrade": apim.is_downgrade(resolved, prev_version)}
+        if version_change["downgrade"]:
+            warnings.append(
+                f"DOWNGRADE ON EXISTING VOLUMES: instance '{instance}' last ran {prev_version}; "
+                f"starting {resolved} runs an OLDER management-api against Mongo data written by "
+                f"{prev_version} — it may mishandle newer documents (upgraders only run forward). "
+                "For a clean downgrade, apim_down(instance, volumes=True) first (WIPES data).")
+        else:
+            warnings.append(f"instance '{instance}' last ran {prev_version}; now starting "
+                            f"{resolved} on the SAME project + volumes (data reused).")
+
     offset = apim.allocate_offset(variant, instance, features)
     if offset is None:
         return {"status": "blocked",
@@ -620,6 +637,7 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
         "features": features,
         "feature_gotchas": feature_gotchas or None,
         "fresh_volumes": fresh_volumes,
+        "version_change": version_change,
         "instance": instance,
         "project": apim.project_for(variant, instance),
         "mode": "coexist" if offset else "canonical",
@@ -693,28 +711,46 @@ def apim_status(instance: str = "default") -> dict:
 
 @mcp.tool()
 def apim_list() -> dict:
-    """List all tracked APIM instances (for generalized coexist) with their status."""
+    """List tracked APIM instances (for coexist) with their status — PLUS what's actually
+    running on Docker.
+
+    IMPORTANT: the `instances` list reflects stacker's own run-records, NOT reality — it's
+    blind to quick-setups and can report a stale record as authoritative (e.g. show a
+    tracked instance "down" while its ports are actually held by something else). So this
+    also returns `other_stacks_on_apim_ports`: any Docker project (quick-setups
+    `gravitee-qs-*`, gamma, or an untracked stack) holding the canonical APIM ports
+    8082–8085 that ISN'T a tracked instance. Before assuming ports are free, prefer
+    `stack_preflight` (it probes actual port occupancy)."""
     instances = []
     for name in apim.known_instances():
         s = _apim_summarize(name)
         instances.append({"instance": name, "overall": s["overall"], "variant": s["variant"],
                           "features": s.get("features"), "version": s["version"],
                           "project": s["project"], "mode": s["mode"], "urls": s["urls"]})
-    return {"status": "ok", "count": len(instances), "instances": instances}
+    foreign = apim.foreign_apim_port_holders()
+    out = {"status": "ok", "count": len(instances), "instances": instances,
+           "other_stacks_on_apim_ports": foreign or None}
+    if foreign:
+        out["note"] = ("canonical APIM ports 8082–8085 are held by non-tracked project(s) "
+                       f"{sorted({h['project'] for h in foreign})} (e.g. a quick-setup). "
+                       "apim_up on the default instance would port-conflict; use stack_preflight.")
+    return out
 
 
 @mcp.tool()
-def apim_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
-    """Stop an APIM instance (`docker compose down`, volumes preserved)."""
+def apim_down(instance: str = "default", timeout_seconds: int = 180, volumes: bool = False) -> dict:
+    """Stop an APIM instance (`docker compose down`). Volumes are PRESERVED by default;
+    pass volumes=True (`down -v`) to also wipe its data — needed for a clean version
+    downgrade (an older management-api mishandles Mongo data written by a newer one)."""
     variant = apim.current_variant(instance)
-    result = apim.run_down(timeout_seconds, variant, instance, apim.current_features(instance))
+    result = apim.run_down(timeout_seconds, variant, instance, apim.current_features(instance), volumes)
     apim.forget_up(instance)
     if result["timed_out"]:
         return {"status": "timeout", "instance": instance, "message": f"down exceeded {timeout_seconds}s.",
                 "stdout_tail": (result["stdout"] or "")[-2000:],
                 "stderr_tail": (result["stderr"] or "")[-2000:]}
     return {"status": "ok" if result["returncode"] == 0 else "error", "instance": instance,
-            "returncode": result["returncode"],
+            "volumes_removed": volumes, "returncode": result["returncode"],
             "stdout": result["stdout"], "stderr": result["stderr"]}
 
 

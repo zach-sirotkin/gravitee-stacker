@@ -110,8 +110,8 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 | -------------------- | ------------------------------------------------------------------------------------------------- |
 | `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `features` (see below), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
 | `apim_status`        | Overall verdict + per-service health, pinned version, variant, features, project, and URLs. Takes `instance`. |
-| `apim_list`          | List all tracked APIM instances with their status/version/features/URLs.                           |
-| `apim_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
+| `apim_list`          | Tracked APIM instances + status/version/features/URLs — **plus** `other_stacks_on_apim_ports` (quick-setups or untracked stacks actually holding 8082–8085; run-records alone are unreliable, so prefer `stack_preflight` for real occupancy). |
+| `apim_down`          | `docker compose down` (volumes preserved). `volumes=true` → `down -v` (wipe data, e.g. for a clean version downgrade). Takes `instance`.                                        |
 | `apim_logs`          | Tail one APIM service (incl. feature services `apim-prometheus` / `apim-redis`). Takes `instance`. |
 | `apim_latest_version`| Resolves the newest stable APIM release tag from the repo (via `git ls-remote`).                   |
 | `apim_plugin_search` | Search the plugin **catalog** (download.gravitee.io) by name/type → latest version.                |

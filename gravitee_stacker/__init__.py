@@ -6,4 +6,4 @@ a generic runner for any official ``docker/quick-setup/*`` config. Everything ru
 Docker Compose; bring-ups are backgrounded and surfaced through two-signal status.
 """
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"

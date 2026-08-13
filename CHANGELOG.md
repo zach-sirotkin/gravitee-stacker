@@ -4,6 +4,25 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] — 2026-08-03
+
+### Fixed
+- **`apim_list` now reflects reality, not just run-records.** It was blind to quick-setups
+  and reported stale records as authoritative (e.g. a tracked instance shown "down" while
+  a `gravitee-qs-*` quick-setup actually held 8082–8085 — trusting it and running `apim_up`
+  would port-conflict with no explanation). `apim_list` now also returns
+  `other_stacks_on_apim_ports`: any Docker project holding the canonical APIM ports that
+  isn't a tracked instance, with a note to use `stack_preflight`.
+- **`apim_up` warns before taking over an existing instance with a different version.** When
+  the requested version differs from the instance's last-tracked one on EXISTING volumes it
+  now reports `version_change` and warns — and for a **downgrade** (an older management-api
+  against Mongo data written by a newer one), it warns loudly to `apim_down(volumes=True)`
+  first. Previously it silently reused the volumes across a downgrade.
+
+### Added
+- **`apim_down(instance, volumes=True)`** (`down -v`) — wipe an instance's data, e.g. for a
+  clean version downgrade. Volumes are still preserved by default.
+
 ## [0.8.1] — 2026-08-03
 
 ### Added

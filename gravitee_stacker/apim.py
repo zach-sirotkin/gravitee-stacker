@@ -376,6 +376,18 @@ def allocate_offset(variant: str, instance: str, features=None) -> Optional[int]
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
+def _semver_tuple(v: Optional[str]) -> Optional[tuple]:
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", (v or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def is_downgrade(new_version: Optional[str], old_version: Optional[str]) -> bool:
+    """True if new_version is an OLDER release than old_version (semver). Used to warn that
+    an older management-api is about to run against Mongo volumes written by a newer one."""
+    n, o = _semver_tuple(new_version), _semver_tuple(old_version)
+    return bool(n and o and n < o)
+
+
 def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     if version and version.lower() != "latest":
         return version.lstrip("v"), None
@@ -478,6 +490,20 @@ def down_project(project: str) -> dict:
             "output": (p.stdout or "") + (p.stderr or "")}
 
 
+def foreign_apim_port_holders() -> list[dict]:
+    """Docker projects actually holding the canonical APIM ports (8082-8085) that are NOT
+    tracked apim instances — e.g. quick-setups (gravitee-qs-*), gamma, or an untracked
+    stack. apim_list is otherwise blind to these: it reports run-records, not reality."""
+    tracked = {project_for(current_variant(i), i) for i in known_instances()}
+    out, seen = [], set()
+    for port in (8082, 8083, 8084, 8085):
+        h = project_holding_port(port)
+        if h and h["project"] not in tracked and h["project"] not in seen:
+            seen.add(h["project"])
+            out.append(h)
+    return out
+
+
 # ── up / down lifecycle ───────────────────────────────────────────────────────
 def launch_up_background(version: str, pull: bool, recreate: bool, port_env: dict,
                          license_path: Optional[str], log_path: Path,
@@ -569,10 +595,14 @@ def ae_mgmt_url(instance: str = "default") -> Optional[str]:
     return f"http://localhost:{port}" if port else None
 
 
-def run_down(timeout: int, variant: str = "default", instance: str = "default", features=None) -> dict:
+def run_down(timeout: int, variant: str = "default", instance: str = "default", features=None,
+             volumes: bool = False) -> dict:
     try:
+        cmd = ["docker", "compose", *compose_args(variant, instance, features=features), "down"]
+        if volumes:
+            cmd.append("-v")
         p = subprocess.run(
-            ["docker", "compose", *compose_args(variant, instance, features=features), "down"],
+            cmd,
             cwd=str(apim_state_dir()), env=_env("latest", variant=variant, features=features, instance=instance),
             capture_output=True, text=True, timeout=timeout,
         )
