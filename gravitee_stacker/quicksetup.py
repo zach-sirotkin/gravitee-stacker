@@ -108,7 +108,16 @@ GOTCHAS = {
                    "on Gravitee Cloud with the same alert config → environmental, not a product bug.)",
         "fix": "For real AE testing use the curated stack instead: apim_up(features=['alert-engine']) "
                "— AE on the shared storage network + ws_discovery=false + a container endpoint, which "
-               "fixes the isolation the quick-setup can't. This raw config stays broken for AE.",
+               "fixes the isolation the quick-setup can't. This raw config stays broken for AE. "
+               "OTHER QUIRKS of this config: `frontend`/`storage` are declared external:true (must "
+               "pre-exist or compose fails); AE's healthcheck is baked into the image (can't override "
+               "in the compose — only ignore it); `./.plugins` is mounted into AE's plugins-ext but "
+               "APIM plugins there are inert for AE (separate product); AE correctly has NO Mongo/ES "
+               "dependency (it stores nothing — don't add one); alerts are entirely manual console "
+               "work (~5 min each, not scriptable). Diagnostic signals: AE log 'Register trigger "
+               "[<id>] [<name>]' = the alert reached the engine; alert HISTORY populated = events "
+               "arrived + evaluated (empty = not arriving). 'Channel is ready'/'Events successfully "
+               "sent.' in the gateway log = bootstrap/heartbeat only, NOT proof request events flow.",
     },
     "prometheus": {
         "severity": "info",

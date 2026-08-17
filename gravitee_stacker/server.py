@@ -1366,7 +1366,8 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
                     f"port(s) needed by quick-setup '{name}' are held by other stack(s): "
                     f"{[(c['port'], c['project']) for c in conflicts]}. It was NOT started. "
                     "These configs can't run on shifted ports — down the conflicting stack "
-                    "(down_conflicting=true) or stop whatever holds the ports, then retry."),
+                    "(down_conflicting=true STOPS the running stack there; data volumes are kept "
+                    "but it's no longer running) or stop whatever holds the ports, then retry."),
                 "conflicts": conflicts,
                 "conflicting_projects": sorted({c["project"] for c in conflicts}),
                 "suggest": {"down_conflicting": {"tool": "quicksetup_up",
