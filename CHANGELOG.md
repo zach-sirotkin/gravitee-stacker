@@ -4,6 +4,18 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] — 2026-08-13
+
+### Changed
+- Docs/notes only. Completed the `ee-with-alert-engine` gotcha note with the remaining
+  reference details from the end-to-end writeup: config quirks (`frontend`/`storage`
+  external:true must pre-exist; AE healthcheck baked into the image, not compose-overridable;
+  `./.plugins` inert for AE; AE has no Mongo/ES dependency by design; alerts are manual
+  console work) and diagnostic signals (`Register trigger` = reached engine; alert HISTORY
+  populated = evaluated; `Channel is ready`/`Events successfully sent.` = bootstrap/heartbeat
+  only, not event flow). `quicksetup_up`'s `port_conflict` message now notes that
+  `down_conflicting` STOPS the running stack (data volumes kept, but no longer running).
+
 ## [0.8.2] — 2026-08-03
 
 ### Fixed
