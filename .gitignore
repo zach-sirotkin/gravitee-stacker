@@ -1,6 +1,15 @@
 # MCP runtime state (tracked up-process metadata + captured logs)
 .run/
 
+# Experimental / ticket-scoped overlays belong in ~/.gravitee/stacker-features (or
+# ~/gravitee/stacker-scratch), NEVER in the package dir. Legit shipped overlays are
+# named for their feature (apim-feature-{alert-engine,debug-logging,prometheus,
+# redis-rate-limit}.yml); scratch is ticket-numbered or otel-collector-*. Guard so a
+# dev session can't accidentally commit — or locally build a wheel from — scratch.
+gravitee_stacker/apim-feature-[0-9]*
+gravitee_stacker/apim-feature-mcd*
+gravitee_stacker/otel-collector-*
+
 # macOS
 .DS_Store
 

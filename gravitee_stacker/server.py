@@ -594,6 +594,17 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
         return {"status": "blocked", "message": f"could not read compose config: {e}"}
     ports, port_env, role_ports = plan["ports"], plan["port_env"], plan["urls"]
 
+    # A coexist instance (offset > 0) means a SECOND console on localhost. Browser cookies
+    # are host-scoped, not port-scoped, so localhost:<a> and localhost:<b> share one jar —
+    # logging into one console silently logs you out of the other. Advise Incognito.
+    if offset:
+        warnings.append(
+            "MULTIPLE CONSOLES SHARE BROWSER COOKIES: this is a second APIM console on "
+            "localhost, and browser cookies are scoped by host (not port), so both consoles "
+            "share one cookie jar — signing into this one logs you out of the other. Open "
+            "THIS console in an Incognito/private window (or a separate browser profile) to "
+            "keep the two sessions independent.")
+
     conflicts = apim.detect_conflicts(ports, variant, instance)
     downed = []
     if conflicts:

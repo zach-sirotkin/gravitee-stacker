@@ -296,6 +296,16 @@ The **kafka** variant is single-instance (its `*.kafka.local` cert + advertised
 listeners assume fixed ports). Up to ~3 concurrent APIM instances fit before the
 port bands run out (offset cap 40000).
 
+> **⚠️ Two consoles in one browser share a login.** Browser cookies are scoped by
+> **host**, not by host **and port**, so every stack on `localhost` (`localhost:8084`,
+> `localhost:28084`, …) writes to the **same cookie jar**. The console's auth cookie
+> (`Auth-Graviteeio-APIM`) is overwritten each time you sign into a different stack, so
+> bouncing between two consoles keeps logging you out of the one you left. This is a
+> browser rule, not a stacker bug. **Open the second stack's console in an Incognito /
+> private window** (its own cookie jar) — or use a separate browser profile per stack —
+> to keep both sessions alive at once. `apim_up` also emits this reminder in its
+> `warnings` whenever it starts a coexist instance.
+
 **Versions.** `version="latest"` resolves the newest stable tag from
 `gravitee-io/gravitee-api-management` → sets `APIM_VERSION` → pulls
 `graviteeio/apim-*:<version>`. Pin a tag with `version="4.12.7"`; reload/recreate with

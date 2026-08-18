@@ -40,7 +40,11 @@ select = ["E", "F"]
 ignore = ["E501", "E402", "E731", "E741"]  # line length, late imports, lambdas, ambiguous names
 
 [tool.hatch.build.targets.wheel]
-# packages includes ALL files under gravitee_stacker/ (composes, kafka certs/config,
-# am nginx conf) — not just .py — so no force-include is needed.
+# packages ships ALL git-TRACKED files under gravitee_stacker/ (composes, feature
+# overlays, kafka certs/config, am nginx conf, logback) — not just .py. Hatchling
+# already respects .gitignore, so tracked assets ship and ignored ones don't.
+# Do NOT add `artifacts = ["*.yml", ...]`: an extension force-include re-admits
+# git-ignored scratch overlays (apim-feature-<ticket>/mcd*, otel-collector-*) that a
+# dev session may drop here, dirtying LOCAL builds. Leaving selection to VCS keeps
+# local and release wheels identically clean. See the matching .gitignore guard.
 packages = ["gravitee_stacker"]
-artifacts = ["*.yml", "*.conf", "*.properties", "*.jks"]
