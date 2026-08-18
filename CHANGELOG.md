@@ -4,6 +4,24 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] — 2026-08-18
+
+### Added
+- **Coexist cookie-jar disclaimer.** Running two APIM consoles in one browser silently
+  shares a login: browser cookies are host-scoped, not port-scoped, so `localhost:8084`
+  and `localhost:28084` share one jar and the console auth cookie (`Auth-Graviteeio-APIM`)
+  is overwritten on each sign-in. `apim_up` now emits a `warnings` note whenever it starts
+  a coexist instance (offset > 0), advising Incognito / a separate browser profile for the
+  second console. Documented in the README's multiple-stacks section.
+
+### Changed
+- **Packaging: wheel is robustly clean.** Removed `artifacts = ["*.yml", …]` from the
+  wheel target — Hatchling already ships tracked non-`.py` assets under `packages` and
+  respects `.gitignore`, so the extension glob was the only thing force-including
+  git-ignored scratch overlays into local builds. Released wheels (built from a clean tag
+  checkout) were already unaffected. Added a `.gitignore` guard against scratch overlays
+  (`apim-feature-<ticket>`/`mcd*`, `otel-collector-*`) landing in the package dir.
+
 ## [0.8.3] — 2026-08-13
 
 ### Changed
