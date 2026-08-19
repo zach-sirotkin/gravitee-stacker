@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -444,6 +445,61 @@ def _apim_summarize(instance: str = "default") -> dict:
     }
 
 
+def _wait_ready(summarize, instance: str, timeout_seconds: int, poll_seconds: int, kind: str) -> dict:
+    """Block until `summarize(instance)['overall']` is healthy, then return at once.
+
+    The server-side, readiness-aware replacement for an agent's `sleep`-loop. Polls actual
+    container health at a SHORT interval and returns the instant the stack is healthy;
+    fails FAST on a non-zero launcher exit ("failed") or nothing running ("down") instead
+    of burning the whole cap. `timeout_seconds` is a safety ceiling, not a fixed sleep.
+    """
+    poll = max(1, min(int(poll_seconds or 4), 30))
+    start = time.monotonic()
+    deadline = start + max(1, int(timeout_seconds or 1))
+    while True:
+        s = summarize(instance)
+        overall = s.get("overall")
+        waited = round(time.monotonic() - start, 1)
+        if overall == "healthy":
+            return {"status": "ready", "ready": True, "overall": overall, "instance": instance,
+                    "waited_seconds": waited, "services": s.get("services"), "urls": s.get("urls")}
+        if overall == "failed":
+            return {"status": "failed", "ready": False, "overall": overall, "instance": instance,
+                    "waited_seconds": waited, "problems": s.get("problems"),
+                    "up_log_tail": s.get("up_log_tail"),
+                    "hint": f"the launcher exited non-zero — inspect {kind}_logs / the up_log_tail; "
+                            "waiting longer won't help."}
+        if overall == "down":
+            return {"status": "down", "ready": False, "overall": overall, "instance": instance,
+                    "waited_seconds": waited,
+                    "hint": f"nothing is running for instance '{instance}' — call {kind}_up first."}
+        # overall is "starting" (launcher/pull in progress) or "partial" (some services not yet
+        # healthy) — both are normal boot states; keep polling until healthy or the cap.
+        if time.monotonic() >= deadline:
+            return {"status": "timeout", "ready": False, "overall": overall, "instance": instance,
+                    "waited_seconds": waited, "problems": s.get("problems"), "services": s.get("services"),
+                    "hint": ("not healthy within the cap — it may still be pulling images on a first-ever "
+                             f"run (raise timeout_seconds), or a service is stuck (check {kind}_logs). "
+                             "This is a ceiling, not a fixed wait.")}
+        time.sleep(poll)
+
+
+@mcp.tool()
+def apim_wait(instance: str = "default", timeout_seconds: int = 420, poll_seconds: int = 4) -> dict:
+    """Block until an APIM instance is actually healthy, then return immediately.
+
+    The readiness-aware alternative to sleeping in a loop after apim_up. Polls real
+    container health every `poll_seconds` and returns the MOMENT `overall` flips to
+    "healthy" — so the common case is fast, not a fixed wait. Fails FAST if the launcher
+    exited non-zero ("failed") or nothing is running ("down") rather than burning the
+    whole cap. `timeout_seconds` is a SAFETY CEILING, not a sleep: raise it for a
+    first-ever image pull (a cold native-Kafka stack can exceed the default); the call
+    still returns early the instant it's healthy. Do NOT wrap this in your own sleep loop
+    — that's the exact pattern it replaces.
+    """
+    return _wait_ready(_apim_summarize, instance, timeout_seconds, poll_seconds, "apim")
+
+
 @mcp.tool()
 def apim_up(version: str = "latest", variant: str = "default", instance: str = "default",
             features: list = None, pull: bool = True, down_conflicting: bool = False,
@@ -492,8 +548,10 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     coexist cleanly.
 
     Pulls the pinned version and `docker compose -p <project> up -d`, returning
-    immediately; poll `apim_status(instance)`. On a port conflict it does NOT start —
-    returns "port_conflict".
+    immediately. Then call `apim_wait(instance)` — it blocks only until the stack is
+    actually healthy and returns at once (fails fast on error), so you never sleep-loop;
+    `apim_status(instance)` remains for a one-shot check. On a port conflict it does NOT
+    start — returns "port_conflict".
 
     IMPORTANT — do NOT decide coexist-vs-down on the user's behalf. When the user asks
     to bring up a stack, leave `instance="default"` unless they explicitly asked for a
@@ -680,7 +738,8 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
         "urls": _apim_urls(role_ports),
         "warnings": warnings,
         "started": started,
-        "next": f"Poll apim_status(instance='{instance}') until overall: healthy.",
+        "next": f"Call apim_wait(instance='{instance}') — it returns the moment the stack is "
+                "healthy (or fails fast). Do NOT write your own sleep loop.",
     }
     if variant == "kafka":
         result["kafka"] = _kafka_demo(apim.project_for("kafka", instance), role_ports)
@@ -1088,6 +1147,18 @@ def _am_summarize(instance: str = "default") -> dict:
 
 
 @mcp.tool()
+def am_wait(instance: str = "default", timeout_seconds: int = 420, poll_seconds: int = 4) -> dict:
+    """Block until an AM instance is actually healthy, then return immediately.
+
+    Same readiness-aware wait as apim_wait, for the AM stack — returns the moment
+    `overall` is "healthy", fails fast on "failed"/"down". The AM management API is slow
+    to pass its healthcheck, so this is exactly what you want instead of a sleep loop.
+    `timeout_seconds` is a safety ceiling, not a fixed wait.
+    """
+    return _wait_ready(_am_summarize, instance, timeout_seconds, poll_seconds, "am")
+
+
+@mcp.tool()
 def am_up(version: str = "latest", instance: str = "default", port: int = 0,
           pull: bool = True, recreate: bool = False, down_conflicting: bool = False) -> dict:
     """Stand up a standalone Gravitee Access Management (AM) stack (background).
@@ -1178,7 +1249,8 @@ def am_up(version: str = "latest", instance: str = "default", port: int = 0,
         "downed_conflicts": downed,
         "urls": am.urls_for(nginx_port),
         "started": started,
-        "next": f"Poll am_status(instance='{instance}') until overall: healthy (mgmt API takes a while).",
+        "next": f"Call am_wait(instance='{instance}') — it returns the moment the stack is healthy "
+                "(the mgmt API is slow, so don't sleep-loop; the wait handles it).",
     }
 
 

@@ -52,7 +52,7 @@ claude mcp add gravitee-stacker -s user -- /ABSOLUTE/PATH/TO/gravitee-stacker/.v
 what's ready and what's missing for each stack.
 
 **4. Run APIM** — that's all it takes for the APIM stack:
-> "Stand up the latest APIM." → `apim_up()` → poll `apim_status` → console at http://localhost:8084 (admin/admin).
+> "Stand up the latest APIM." → `apim_up()` → `apim_wait()` (returns when healthy) → console at http://localhost:8084 (admin/admin).
 
 ### Where to put things
 
@@ -110,6 +110,7 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 | -------------------- | ------------------------------------------------------------------------------------------------- |
 | `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `features` (see below), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
 | `apim_status`        | Overall verdict + per-service health, pinned version, variant, features, project, and URLs. Takes `instance`. |
+| `apim_wait`          | **Block until the stack is actually healthy, then return at once** — the readiness-aware alternative to sleeping in a loop after `apim_up`. Returns the moment `overall` flips to healthy; fails fast on a crashed launcher (`failed`) or nothing running (`down`). `timeout_seconds` is a safety ceiling (raise it for a first-ever pull), not a fixed wait. |
 | `apim_list`          | Tracked APIM instances + status/version/features/URLs — **plus** `other_stacks_on_apim_ports` (quick-setups or untracked stacks actually holding 8082–8085; run-records alone are unreliable, so prefer `stack_preflight` for real occupancy). |
 | `apim_down`          | `docker compose down` (volumes preserved). `volumes=true` → `down -v` (wipe data, e.g. for a clean version downgrade). Takes `instance`.                                        |
 | `apim_logs`          | Tail one APIM service (incl. feature services `apim-prometheus` / `apim-redis`). Takes `instance`. |
@@ -205,6 +206,7 @@ host** (one port); everything else is internal.
 | ------------------ | ----------------------------------------------------------------------------------------------- |
 | `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.11.10"`), `instance` (run several at once), `port` (default `AM_NGINX_PORT` or 8086), `recreate=true`, `down_conflicting=true`. |
 | `am_status`        | Overall verdict + per-service health, version, port, project, URLs. Takes `instance`. The management API is slow — status stays `partial` until its healthcheck passes, so wait for `healthy`. |
+| `am_wait`          | Block until the AM stack is healthy, then return at once (fails fast on error). Use it instead of a sleep loop after `am_up` — the slow mgmt-API healthcheck is exactly what it handles. |
 | `am_list`          | List all tracked AM instances with their status/version/port/URLs.                                |
 | `am_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
 | `am_logs`          | Tail one AM service (e.g. `gateway`, `management`). Takes `instance`.                               |
