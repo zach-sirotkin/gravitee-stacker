@@ -4,6 +4,31 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] — 2026-08-19
+
+### Fixed
+- **`stack_preflight` no longer offers an impossible coexist path for kafka (bug).** On a
+  port conflict (and in the already-running branch), the message template always suggested
+  "coexist mode (a named instance on shifted ports)" even though the `options` dict
+  correctly omitted it for kafka — so an agent trusting the prose over the structure would
+  offer a path that can't work. Both messages now branch on `can_coexist` and, for kafka,
+  state *why* coexist is unavailable. Added `can_coexist` to the payloads.
+
+### Changed
+- **Custom feature overlays are now discoverable at the MCP surface.** The
+  `~/.gravitee/stacker-features/` mechanism (drop an `apim-feature-<name>.yml`, override
+  the dir with `APIM_FEATURES_DIR`, a user overlay shadows a bundled one, overlays survive
+  upgrades because they live outside the package) was documented only in a Python docstring
+  that never reached the client. Added a "Custom overlays" paragraph to `apim_up`, enriched
+  the unknown-feature error to point at `features_dir()` (and return it as a field), and
+  cross-referenced it from `apim_plugin_add` as the answer to "how do I mount an extra file
+  into the gateway".
+- **The kafka single-instance restriction now states its mechanism, not just "fixed
+  ports".** "Fixed ports" invited the wrong inference that a port offset would help; the
+  `apim_up` block message and variant docstring now cite the real blocker — fixed
+  `*.kafka.local` certs + literal broker ports (9091, 9093–9096) that a port offset can't
+  reconcile.
+
 ## [0.8.4] — 2026-08-18
 
 ### Added
