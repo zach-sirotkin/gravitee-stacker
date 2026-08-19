@@ -4,6 +4,23 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] — 2026-08-19
+
+### Added
+- **`apim_wait` / `am_wait` / `stack_wait` — readiness-aware waits.** The tool launches
+  stacks asynchronously but previously offered only a one-shot `*_status`, so agents
+  hand-rolled `while ps -p <pid>; do sleep 20; done` loops with 30-minute deadlines —
+  and watched the launcher PID, which dies right after `up -d`, *before* the stack is
+  healthy. The new `*_wait` tools poll REAL container health (the existing `overall`
+  verdict) at a short interval and return the MOMENT it flips to `healthy`; they fail
+  FAST on a non-zero launcher exit (`failed`), nothing running (`down`), or an
+  unreadable stack (`error`, e.g. never started) instead of burning the cap.
+  `timeout_seconds` is a SAFETY CEILING, not a fixed sleep (raise it for a first-ever
+  cold pull; `stack_wait` defaults higher since Gamma's first build is slow). The
+  `*_up` results and docstrings now steer to these ("do NOT write your own sleep loop").
+  The wait loop tolerates a transient probe hiccup after a first good read (retries to
+  the cap) rather than crashing.
+
 ## [0.8.5] — 2026-08-19
 
 ### Fixed

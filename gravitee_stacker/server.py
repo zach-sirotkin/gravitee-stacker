@@ -150,7 +150,8 @@ def stack_up(pull: bool = True) -> dict:
 
     Launches `run.sh` in a detached subprocess, redirecting output to .run/up.log,
     and returns immediately — it never waits, so cold image pulls won't time out
-    your MCP client. Poll `stack_status` to learn when the stack is ready.
+    your MCP client. Call `stack_wait()` to block only until the stack is actually healthy
+    (returns at once, fails fast on error); `stack_status` remains for a one-shot check.
 
     The Gamma stack runs on its canonical ports (it's strict about them — its
     consoles hardcode host-routing and :80, so remapping isn't supported). Before
@@ -206,7 +207,8 @@ def stack_up(pull: bool = True) -> dict:
         "status": "starting", "mode": "canonical", "pid": proc.pid,
         "log_path": str(log_path), "pull": pull, "started": started,
         "warnings": env["warnings"],
-        "next": "Poll stack_status to see when services become healthy.",
+        "next": "Call stack_wait() — it returns the moment the stack is healthy (or fails "
+                "fast). Do NOT sleep-loop or watch the run.sh PID.",
     }
 
 
@@ -226,6 +228,20 @@ def stack_status() -> dict:
     stack_up and cleared by stack_down.
     """
     return _summarize()
+
+
+@mcp.tool()
+def stack_wait(timeout_seconds: int = 600, poll_seconds: int = 4) -> dict:
+    """Block until the Gamma stack is actually healthy, then return immediately.
+
+    The readiness-aware alternative to sleeping in a loop (or watching the run.sh PID)
+    after stack_up. Polls real service health and returns the MOMENT the stack is
+    healthy; fails fast on a non-zero run.sh exit ("failed") or nothing running ("down").
+    `timeout_seconds` is a safety ceiling, not a fixed wait — Gamma's first build can be
+    slow, so it defaults higher than the APIM/AM waits; raise it further for a cold first
+    run. The Gamma stack is single-instance, so there is no `instance` argument.
+    """
+    return _wait_ready(lambda _inst: _summarize(), "gamma", timeout_seconds, poll_seconds, "stack")
 
 
 @mcp.tool()
@@ -456,10 +472,26 @@ def _wait_ready(summarize, instance: str, timeout_seconds: int, poll_seconds: in
     poll = max(1, min(int(poll_seconds or 4), 30))
     start = time.monotonic()
     deadline = start + max(1, int(timeout_seconds or 1))
+    saw_ok = False
     while True:
-        s = summarize(instance)
-        overall = s.get("overall")
         waited = round(time.monotonic() - start, 1)
+        try:
+            s = summarize(instance)
+        except Exception as e:
+            # First-ever probe failing = a setup/config problem the wait can't outlast (e.g.
+            # the stack was never started, or a repo dir is missing). Return at once. A failure
+            # AFTER a prior good read is treated as a transient hiccup and retried to the cap.
+            if not saw_ok:
+                return {"status": "error", "ready": False, "instance": instance, "waited_seconds": waited,
+                        "error": str(e),
+                        "hint": f"couldn't read {kind} status — is the stack started? call {kind}_up first."}
+            if time.monotonic() >= deadline:
+                return {"status": "timeout", "ready": False, "instance": instance, "waited_seconds": waited,
+                        "error": str(e), "hint": "status probe kept failing near the deadline."}
+            time.sleep(poll)
+            continue
+        saw_ok = True
+        overall = s.get("overall")
         if overall == "healthy":
             return {"status": "ready", "ready": True, "overall": overall, "instance": instance,
                     "waited_seconds": waited, "services": s.get("services"), "urls": s.get("urls")}

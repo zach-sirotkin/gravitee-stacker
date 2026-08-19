@@ -93,6 +93,7 @@ The stack families listed above, tool by tool. Two meta tools first:
 | ------------------------ | -------------------------------------------------------------------------------------------- |
 | `stack_up`               | Launches `run.sh` **in the background** (pull + `up -d` + health poll), returns immediately. |
 | `stack_status`           | Two independent signals: is the tracked up-process alive, **and** `docker compose ps` health. Returns `starting`/`healthy`/`partial`/`down`/`failed`, per-service state, and the tail of `up.log`. |
+| `stack_wait`             | Block until the Gamma stack is healthy, then return at once (fails fast on error). Use it after `stack_up` instead of a sleep loop or watching the `run.sh` PID. Defaults to a higher ceiling than APIM/AM since the first Gamma build is slow. |
 | `stack_setup`            | Runs `run.sh setup` in the foreground (configurable timeout, default 5 min).                  |
 | `stack_down`             | Runs `run.sh down` (`docker compose down`).                                                   |
 | `stack_logs`             | `docker compose logs --tail=<lines> <service>` for one validated service.                     |
