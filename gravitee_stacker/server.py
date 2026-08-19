@@ -454,7 +454,9 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
       * "default" (OSS): mongo + es + gateway + management-api + console + portal.
       * "kafka": the native-Kafka gateway stack (adds a KRaft broker + kafka-client;
         gateway binds a Kafka listener on :9092 TLS). REQUIRES an EE license. Single
-        instance / fixed ports.
+        instance — fixed *.kafka.local certs and broker ports (9091, 9093–9096 are
+        literals; a port offset can't resolve the cert/hostname collision, so coexist
+        is unavailable for kafka — unlike the default variant).
 
     Features (composable add-ons): pass `features` to layer capabilities onto EITHER
     base — each is a curated compose overlay merged with `-f`. Available:
@@ -472,6 +474,15 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     kafka base too — so `variant="kafka", features=[...]` is a Kafka stack with those
     add-ons. (These are the curated, coexist-safe equivalent of the one-shot
     `quicksetup_*` configs — prefer these when you want to MIX capabilities.)
+
+    Custom overlays (the list above is NOT closed): drop an `apim-feature-<name>.yml`
+    into `~/.gravitee/stacker-features/` (override the dir with `APIM_FEATURES_DIR`) and
+    pass `<name>` in `features` exactly like a built-in — it's merged with `-f` the same
+    way. A user overlay of the same name as a bundled one TAKES PRECEDENCE, so you can
+    shadow a built-in. Because this dir lives OUTSIDE the installed package, your overlays
+    survive tool upgrades (they're never wiped) and never ship with the tool. This is also
+    the answer to "how do I mount an extra file / env into the gateway" — author a small
+    overlay here rather than editing site-packages.
 
     Instances (generalized coexist): pass a unique `instance` name to run MULTIPLE
     APIM stacks at once. instance="default" uses the canonical ports/project
@@ -513,11 +524,16 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     bad = apim.unknown_features(features)
     if bad:
         return {"status": "blocked",
-                "message": f"unknown feature(s) {bad}; available: {list(apim.FEATURES)} "
-                           f"(prefix with '-' to opt out of a default: {list(apim.default_features())})."}
+                "message": f"unknown feature(s) {bad}; built-in: {list(apim.FEATURES)} "
+                           f"(prefix with '-' to opt out of a default: {list(apim.default_features())}). "
+                           f"For a CUSTOM feature, drop apim-feature-<name>.yml into "
+                           f"{apim.features_dir()} (or set APIM_FEATURES_DIR) and pass <name> here.",
+                "features_dir": str(apim.features_dir())}
     if not apim.supports_instances(variant) and instance != "default":
         return {"status": "blocked",
-                "message": f"the {variant} variant is single-instance (fixed ports); use instance='default'."}
+                "message": (f"the {variant} variant is single-instance — fixed *.kafka.local certs and "
+                            "broker ports (9091, 9093–9096 are literals; a port offset can't resolve the "
+                            "cert/hostname collision). Use instance='default'.")}
     # "Already up" = the tracked launcher is alive (mid-start) OR the project has running
     # containers. The container check is authoritative: the launcher exits once `up -d`
     # returns, so a genuinely-running stack must NOT be treated as absent and recreated.
@@ -961,6 +977,12 @@ def apim_plugin_add(source: str, version: str = "latest", type: str = "", instan
     Note: a plugin's version is its OWN line, not the APIM version — check compatibility
     with apim_plugin_info first. EE plugins additionally need an APIM license on the stack.
     If the instance isn't running, the plugin is staged and loads on the next apim_up.
+
+    This tool is for CATALOG plugins. To mount an arbitrary EXTRA file or env into the
+    gateway/management-api (a config file, a hand-built jar, a custom logback), that's a
+    feature OVERLAY, not a plugin: drop an `apim-feature-<name>.yml` into
+    `~/.gravitee/stacker-features/` (or set APIM_FEATURES_DIR) and pass `<name>` to
+    apim_up(features=[...]). See apim_up's docstring.
     """
     if source.startswith("http://") or source.startswith("https://"):
         url = source
@@ -1532,14 +1554,17 @@ def stack_preflight(kind: str = "apim", version: str = "latest", variant: str = 
         if can_coexist:
             opts["coexist"] = {"tool": up_tool, "args": {**up_base, "instance": "b"},
                                "ports": coexist_ports or "next free port"}
+        coexist_or_not = (" or run a SECOND stack as a named instance (coexist)" if can_coexist
+                          else f" — the {variant} variant can't coexist (fixed *.kafka.local certs + "
+                               "literal broker ports), so down it first if you need a different one")
         return {
             "status": "running", "kind": kind, "resolved_version": resolved,
             "variant": variant if kind == "apim" else None, "ports": ports, "project": project,
+            "can_coexist": can_coexist,
             "message": (
                 f"the {kind} 'default' stack is ALREADY RUNNING on the canonical ports (project "
                 f"{project}). Do NOT start on canonical ports — it would RECREATE its containers. "
-                f"Inspect it ({kind}_status), stop it first ({kind}_down), or run a SECOND stack as a "
-                "named instance (coexist)."),
+                f"Inspect it ({kind}_status), stop it first ({kind}_down){coexist_or_not}."),
             "options": opts,
         }
 
@@ -1556,17 +1581,27 @@ def stack_preflight(kind: str = "apim", version: str = "latest", variant: str = 
     if can_coexist:
         options["coexist"] = {"tool": up_tool, "args": {**up_base, "instance": "b"},
                               "ports": coexist_ports or "next free port"}
+    # Keep the prose in lock-step with `options`: only offer coexist when it actually works.
+    # For kafka it does NOT (fixed *.kafka.local certs + literal broker ports), so say why
+    # rather than dangling a path an agent would then try and fail on.
+    if can_coexist:
+        choice = ("Ask the user: down the conflicting stack (down_conflicting), or run the new "
+                  "one in coexist mode (a named instance on shifted ports)?")
+    else:
+        choice = ("The only option is to down the conflicting stack (down_conflicting): the "
+                  f"{variant} variant can't coexist — its *.kafka.local certs and broker ports "
+                  "(9091, 9093–9096 are literals) are fixed, so a port offset can't resolve the "
+                  "cert/hostname collision.")
     return {
         "status": "conflict", "kind": kind, "resolved_version": resolved,
         "variant": variant if kind == "apim" else None, "ports": ports,
         "license_note": license_note,
+        "can_coexist": can_coexist,
         "conflicts": conflicts,
         "conflicting_projects": sorted({c["project"] for c in conflicts}),
         "message": (
             f"{kind} {resolved} needs port(s) {sorted({c['port'] for c in conflicts})}, held by "
-            f"{sorted({c['project'] for c in conflicts})}. Ask the user: down the conflicting "
-            "stack (down_conflicting), or run the new one in coexist mode (a named instance on "
-            "shifted ports)?"),
+            f"{sorted({c['project'] for c in conflicts})}. {choice}"),
         "options": options,
     }
 
