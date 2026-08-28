@@ -4,6 +4,33 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] — 2026-08-20
+
+### Added
+- **`quicksetup_up(fetch=False)`** reuses the on-disk workdir as-is — no re-clone, no
+  autofix re-apply — so local edits (instrumentation, tweaks) are preserved across runs.
+  `fetch=True` (default) still re-fetches upstream but now WARNS when it overwrites an
+  existing workdir. Fixes the silent loss of workdir edits, making quicksetups usable for
+  investigation. New `quicksetup.reuse()` / `workdir_present()`.
+
+### Fixed
+- **User feature overlays can reference `${APIM_LICENSE}`.** `_env` only defined it for
+  kafka / alert-engine / an explicit license, so a plain-default overlay mirroring the
+  built-in `apim-license.yml` failed `docker compose config` with "empty section between
+  colons". `_env` now ALWAYS defines `APIM_LICENSE` (resolved license or the conventional
+  path). `apim_up`'s custom-overlay note documents the portable vars overlays may use.
+- **`apim_plugin_search` empty results no longer read as "doesn't exist".** A zero-result
+  response now carries a `no_results_note`: the catalog only covers the artifact families,
+  and NODE-level plugins (`gravitee-node-*`: cluster/cache standalone, DSP sync) are
+  bundled in the images (use `apim_plugin_bundled`), not published to the catalog.
+
+### Changed
+- **`apim_up` reconfigures a running instance in place.** When the requested
+  version/variant/features DIFFER from what's running and `recreate=True`, it does the
+  down+up (volumes kept) in ONE call instead of returning `already_running` — the fast
+  path for config iteration. The `already_running` response now surfaces `running_config`
+  vs `requested_config` + `same_config` so the diff is visible.
+
 ## [0.8.6] — 2026-08-19
 
 ### Added
