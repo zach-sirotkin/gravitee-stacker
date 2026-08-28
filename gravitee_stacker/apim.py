@@ -289,8 +289,13 @@ def _env(version: str = "latest", extra: Optional[dict] = None,
         # APIM_LICENSE is defined (the overlay mounts it into AE) even on read paths that
         # weren't passed a license_path — AE is EE, so a license is present at `up`.
         env["AE_VERSION"] = os.environ.get("AE_VERSION") or ae_version_for(version)
-        if not env.get("APIM_LICENSE"):
-            env["APIM_LICENSE"] = resolve_license("")[0] or str(DEFAULT_LICENSE_PATH)
+    # Always define APIM_LICENSE so a USER overlay can reference ${APIM_LICENSE} (mirroring the
+    # built-in apim-license.yml) and still pass `docker compose config` validation on a plain
+    # default stack — otherwise the unset var yields an empty bind spec ("empty section between
+    # colons"). Points at the resolved license, else the conventional path. HOME and the other
+    # feature vars above are likewise available to overlays; see apim_up's "Custom overlays" note.
+    if not env.get("APIM_LICENSE"):
+        env["APIM_LICENSE"] = resolve_license("")[0] or str(DEFAULT_LICENSE_PATH)
     if extra:
         env.update(extra)
     return env

@@ -231,7 +231,7 @@ version (a sparse + blobless depth-1 clone of just that subdir, ~1–2 s) and ru
 | Tool                | What it does                                                                                       |
 | ------------------- | ------------------------------------------------------------------------------------------------- |
 | `quicksetup_list`   | List every `docker/quick-setup/*` config at a version (`"latest"` or a tag), plus which are running locally. |
-| `quicksetup_up`     | Fetch `<name>` + `docker compose up -d` in the background. Drops `~/.gravitee/license.key` in if the config mounts one. On a port conflict returns `port_conflict`. Returns the fetched **README** so its manual steps are at hand. Options: `version`, `pull`, `recreate`, `down_conflicting`. |
+| `quicksetup_up`     | Fetch `<name>` + `docker compose up -d` in the background. Drops `~/.gravitee/license.key` in if the config mounts one. On a port conflict returns `port_conflict`. Returns the fetched **README** so its manual steps are at hand. Options: `version`, `pull`, `recreate`, `down_conflicting`, `fetch`. **`fetch=False` reuses your EDITED workdir instead of re-cloning** — the default `fetch=True` overwrites local edits (and now warns when it does). Loop: fetch once → edit `docker-compose.yml` in the workdir → re-run `fetch=False, recreate=True`. |
 | `quicksetup_status` | Overall verdict + per-service health, version, project, ports, up-log tail.                        |
 | `quicksetup_down`   | `docker compose down` (add `volumes=true` for `down -v`).                                          |
 | `quicksetup_logs`   | Tail one service of a running config.                                                              |

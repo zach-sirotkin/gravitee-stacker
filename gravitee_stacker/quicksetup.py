@@ -338,6 +338,38 @@ def fetch(name: str, version: str) -> tuple[Optional[FetchResult], Optional[str]
                        gotcha=gotcha_for(name), autofixes=autofixes or None), None
 
 
+def workdir_present(name: str) -> bool:
+    """True if a fetched workdir with a compose file already exists on disk."""
+    return compose_path(name).is_file()
+
+
+def reuse(name: str, version: str) -> tuple[Optional[FetchResult], Optional[str]]:
+    """Reuse the EXISTING on-disk workdir as-is — NO re-fetch, so local edits are preserved.
+
+    The `fetch=False` path. Does not clone, wipe, or re-apply autofixes (those would clobber
+    user edits). Re-derives license/gotcha metadata from the on-disk compose. Errors if there
+    is no workdir to reuse (fetch once first).
+    """
+    dst = workdir(name)
+    if not compose_path(name).is_file():
+        return None, (f"no local workdir to reuse for '{name}' (expected {compose_path(name)}). "
+                      "Run quicksetup_up with fetch=True once to fetch it first.")
+    needs_license = LICENSE_MARKER in compose_path(name).read_text(errors="replace")
+    license_mounted = (dst / ".license" / "license.key").is_file()
+    license_source = "reused workdir/.license" if license_mounted else None
+    if needs_license and not license_mounted:
+        lic_path, lic_src = apim.resolve_license("")
+        if lic_path:
+            lic_dir = dst / ".license"
+            lic_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(lic_path, lic_dir / "license.key")
+            license_mounted, license_source = True, lic_src
+    return FetchResult(name=name, version=version, workdir=str(dst),
+                       needs_license=needs_license, license_mounted=license_mounted,
+                       license_source=license_source,
+                       gotcha=gotcha_for(name), autofixes=None), None
+
+
 def readme(name: str, limit: int = 6000) -> Optional[str]:
     p = readme_path(name)
     if not p.is_file():

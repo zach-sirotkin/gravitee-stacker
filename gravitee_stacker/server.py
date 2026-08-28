@@ -570,7 +570,11 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     shadow a built-in. Because this dir lives OUTSIDE the installed package, your overlays
     survive tool upgrades (they're never wiped) and never ship with the tool. This is also
     the answer to "how do I mount an extra file / env into the gateway" — author a small
-    overlay here rather than editing site-packages.
+    overlay here rather than editing site-packages. Your overlay can reference the same
+    env vars the built-in overlays use — they're exported even for read-only validation:
+    `${APIM_LICENSE}` (resolved license path, mirrors apim-license.yml), `${HOME}`,
+    `${APIM_PLUGINS_DIR}`, `${APIM_VERSION}` — so overlays stay portable (no hardcoded
+    absolute host paths needed).
 
     Instances (generalized coexist): pass a unique `instance` name to run MULTIPLE
     APIM stacks at once. instance="default" uses the canonical ports/project
@@ -604,7 +608,9 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
             `features`, so you can always see what actually got layered on.
         pull: Pull images before up (default).
         down_conflicting: down conflicting projects first (no -v; data kept).
-        recreate: `up -d --force-recreate`.
+        recreate: `up -d --force-recreate`. ALSO: on an already-running instance whose
+            requested version/variant/features DIFFER, recreate=True reconfigures it in
+            place (down+up, volumes kept) in one call — the fast path for config iteration.
         license: Path to a license.key. Empty = APIM_LICENSE env, else ~/.gravitee/license.key.
     """
     if variant not in apim.VARIANTS:
@@ -624,17 +630,6 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
                 "message": (f"the {variant} variant is single-instance — fixed *.kafka.local certs and "
                             "broker ports (9091, 9093–9096 are literals; a port offset can't resolve the "
                             "cert/hostname collision). Use instance='default'.")}
-    # "Already up" = the tracked launcher is alive (mid-start) OR the project has running
-    # containers. The container check is authoritative: the launcher exits once `up -d`
-    # returns, so a genuinely-running stack must NOT be treated as absent and recreated.
-    if apim.is_up_running(instance) or apim.stack_running(variant, instance):
-        return {"status": "already_running", "instance": instance,
-                "project": apim.project_for(variant, instance),
-                "message": f"APIM instance '{instance}' is already running (project "
-                           f"{apim.project_for(variant, instance)}). Starting it again would RECREATE its "
-                           f"containers. Inspect with apim_status(instance='{instance}'), stop with "
-                           f"apim_down(instance='{instance}'), or run a SECOND stack as a named instance."}
-
     docker_err = runner.docker_running_error()
     if docker_err:
         return {"status": "blocked", "message": docker_err}
@@ -642,6 +637,36 @@ def apim_up(version: str = "latest", variant: str = "default", instance: str = "
     resolved, err = apim.resolve_version(version)
     if err:
         return {"status": "blocked", "message": err}
+
+    # "Already up" = the tracked launcher is alive (mid-start) OR the project has running
+    # containers (authoritative: the launcher exits once `up -d` returns). When the requested
+    # version/variant/features DIFFER from what's running, recreate=True reconfigures IN PLACE
+    # (down+up, volumes kept) so a config-iteration is ONE call, not down-then-up.
+    if apim.is_up_running(instance) or apim.stack_running(variant, instance):
+        cur_variant = apim.current_variant(instance) or variant
+        cur_version = apim.current_version(instance)
+        cur_features = list(apim.current_features(instance) or [])
+        same_config = (cur_variant == variant and cur_version in (None, resolved)
+                       and set(cur_features) == set(features))
+        project = apim.project_for(variant, instance)
+        if same_config or not recreate:
+            running_config = {"variant": cur_variant, "version": cur_version, "features": sorted(cur_features)}
+            requested_config = {"variant": variant, "version": resolved, "features": sorted(features)}
+            if same_config:
+                msg = (f"APIM instance '{instance}' is already running with the SAME config "
+                       f"(project {project}); nothing to do — inspect apim_status(instance='{instance}').")
+            else:
+                msg = (f"APIM instance '{instance}' is already running with a DIFFERENT config "
+                       "(see running_config vs requested_config). To APPLY the change in ONE call, "
+                       f"re-run apim_up(instance='{instance}', recreate=True, …) — it reconfigures in "
+                       f"place (down+up, volumes kept). Or apim_down(instance='{instance}') first.")
+            return {"status": "already_running", "instance": instance, "project": project,
+                    "same_config": same_config, "running_config": running_config,
+                    "requested_config": requested_config, "message": msg}
+        # Different config + recreate=True → reconfigure IN PLACE: down the running project
+        # (keep volumes) using its CURRENT variant/features, then fall through to the normal
+        # up path below with the new config.
+        apim.run_down(180, variant=cur_variant, instance=instance, features=cur_features)
 
     license_path, license_src = apim.resolve_license(license)
     if apim.requires_license(variant) and not license_path:
@@ -999,10 +1024,22 @@ def apim_plugin_search(query: str = "", type: str = "") -> dict:
         results = plugins.search(query, type)
     except Exception as e:  # network/XML
         return {"status": "error", "message": f"catalog query failed: {e}"}
-    return {"status": "ok", "query": query, "type": type or "all", "count": len(results),
-            "plugins": results,
-            "note": "Add one with apim_plugin_add(name). Check compatibility first with "
-                    "apim_plugin_info(name). Version numbers are the plugin's own line — NOT the APIM version."}
+    out = {"status": "ok", "query": query, "type": type or "all", "count": len(results),
+           "plugins": results,
+           "note": "Add one with apim_plugin_add(name). Check compatibility first with "
+                   "apim_plugin_info(name). Version numbers are the plugin's own line — NOT the APIM version."}
+    if not results:
+        # A zero-result read must NOT be mistaken for "this plugin doesn't exist". The catalog
+        # only covers the artifact families below; NODE-level plugins are shipped INSIDE the
+        # images, not published to it — so `apim_plugin_bundled` is where to look for those.
+        out["no_results_note"] = (
+            f"No catalog match for query={query!r} type={type or 'any'}. This does NOT mean the "
+            "plugin doesn't exist — the download.gravitee.io catalog only covers these families: "
+            f"{list(plugins.PLUGIN_TYPES)}. NODE-level plugins (gravitee-node-*: cluster/cache "
+            "standalone e.g. hazelcast, the DSP distributed-sync bits) are bundled inside the APIM "
+            "images and are NOT in this catalog — list them with apim_plugin_bundled(component=…) "
+            "instead. Also try a broader query or drop the type filter.")
+    return out
 
 
 @mcp.tool()
@@ -1430,13 +1467,21 @@ def quicksetup_list(version: str = "latest") -> dict:
 
 @mcp.tool()
 def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
-                  recreate: bool = False, down_conflicting: bool = False) -> dict:
+                  recreate: bool = False, down_conflicting: bool = False,
+                  fetch: bool = True) -> dict:
     """Fetch an official APIM quick-setup config and stand it up (background, non-blocking).
 
     Fetches `docker/quick-setup/<name>` from the APIM repo at the pinned version, copies
     it into a local workdir, drops ~/.gravitee/license.key in if the config mounts one,
     then `docker compose -p gravitee-qs-<name> up -d`. Returns immediately — poll
     `quicksetup_status(name)`.
+
+    LOCAL EDITS: fetch=True (default) RE-CLONES the upstream config into the workdir, which
+    OVERWRITES any manual edits you made there (e.g. instrumentation) — the result warns you
+    when it overwrote an existing workdir. To iterate on an EDITED workdir (add logging,
+    tweak a service) WITHOUT losing it, pass **fetch=False**: it reuses the on-disk workdir
+    as-is (no clone, no autofix re-apply). Typical loop: fetch once (fetch=True) → edit the
+    workdir's docker-compose.yml → re-run with fetch=False, recreate=True.
 
     IMPORTANT — this runs the UPSTREAM config verbatim, so it inherits that config's
     gotchas and any MANUAL steps (keycloak realm import, native-kafka console setup,
@@ -1460,6 +1505,8 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
         pull: pull images before up (default).
         recreate: `up -d --force-recreate`.
         down_conflicting: down any project holding the needed ports first (no -v; data kept).
+        fetch: True (default) re-clones upstream into the workdir, OVERWRITING local edits;
+            False reuses the on-disk workdir as-is (preserves your edits — see LOCAL EDITS).
     """
     if quicksetup.is_up_running(name):
         return {"status": "already_running",
@@ -1473,11 +1520,23 @@ def quicksetup_up(name: str, version: str = "latest", pull: bool = True,
     if err:
         return {"status": "blocked", "message": err}
 
-    fetched, err = quicksetup.fetch(name, resolved)
-    if err:
-        return {"status": "blocked", "message": err}
-
     warnings = []
+    had_workdir = quicksetup.workdir_present(name)
+    if fetch:
+        fetched, err = quicksetup.fetch(name, resolved)
+        if err:
+            return {"status": "blocked", "message": err}
+        if had_workdir:
+            warnings.append(
+                f"RE-FETCHED upstream '{name}' into {fetched.workdir} — any LOCAL EDITS to that "
+                "workdir were overwritten. To iterate on an edited workdir, re-run with fetch=False.")
+    else:
+        fetched, err = quicksetup.reuse(name, resolved)
+        if err:
+            return {"status": "blocked", "message": err}
+        warnings.append(
+            f"REUSING the on-disk workdir {fetched.workdir} as-is (fetch=False) — upstream was NOT "
+            "re-fetched and autofixes were NOT re-applied, so your local edits are preserved.")
     if fetched.needs_license and not fetched.license_mounted:
         warnings.append(
             f"'{name}' mounts ./.license but no license was found (checked ~/.gravitee/license.key "
