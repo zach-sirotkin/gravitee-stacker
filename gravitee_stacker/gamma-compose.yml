@@ -3,12 +3,12 @@
 # adapted for stacker:
 #   * image tags parameterized via ${GAMMA_VERSION:-4.12};
 #   * container_name / fixed network name dropped so `-p <project>` isolates + cleans up;
+#   * HOST ports parameterized (${GAMMA_*_PORT}) so named instances coexist on shifted bands;
+#     the baked-in localhost URLs + CORS origins use the SAME vars so they shift together;
 #   * healthchecks added (mongo/es/mgmt-api) so stacker's health-based status/wait work.
 # PUBLIC Docker Hub images ONLY — NO ACR, and NO license needed (Agent Management is the one
-# module that needs a license; API/AuthZ/Platform Management all run without one). This is the
-# self-contained counterpart to the private SDK-repo `stack_*` path (graviteeio.azurecr.io).
-# Ports 8082-8086 are canonical/fixed (single instance): gateway 8082, mgmt-api 8083,
-# console 8084, portal 8085, gamma console 8086.
+# module that wants one; API/AuthZ/Platform Management all run without it). Container-internal
+# ports stay fixed; only the published host ports shift with the instance offset.
 networks:
   gamma: {}
 volumes:
@@ -50,7 +50,7 @@ services:
       mongodb: {condition: service_healthy}
       elasticsearch: {condition: service_healthy}
     ports:
-      - "8082:8082"
+      - "${GAMMA_GATEWAY_PORT:-8082}:8082"
     environment:
       # Turn on Gamma in the Gateway (required for AuthZ policy/PDP sync)
       - gravitee_gamma_enabled=true
@@ -66,19 +66,20 @@ services:
       mongodb: {condition: service_healthy}
       elasticsearch: {condition: service_healthy}
     ports:
-      - "8083:8083"
+      - "${GAMMA_MGMT_PORT:-8083}:8083"
     environment:
       # Turn on Gamma in the Management API
       - gravitee_gamma_enabled=true
       - gravitee_management_mongodb_uri=mongodb://mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
       - gravitee_analytics_elasticsearch_endpoints_0=http://elasticsearch:9200
-      - gravitee_installation_standalone_console_url=http://localhost:8084
-      - gravitee_installation_standalone_portal_url=http://localhost:8085
+      # Console and portal URLs (host ports — shift with the instance offset)
+      - gravitee_installation_standalone_console_url=http://localhost:${GAMMA_CONSOLE_PORT:-8084}
+      - gravitee_installation_standalone_portal_url=http://localhost:${GAMMA_PORTAL_PORT:-8085}
       # CORS - allow the console origins with credentials (one-host cross-port login)
       - gravitee_http_cors_enabled=true
-      - gravitee_http_cors_allow-origin_0=http://localhost:8084
-      - gravitee_http_cors_allow-origin_1=http://localhost:8085
-      - gravitee_http_cors_allow-origin_2=http://localhost:8086
+      - gravitee_http_cors_allow-origin_0=http://localhost:${GAMMA_CONSOLE_PORT:-8084}
+      - gravitee_http_cors_allow-origin_1=http://localhost:${GAMMA_PORTAL_PORT:-8085}
+      - gravitee_http_cors_allow-origin_2=http://localhost:${GAMMA_UI_PORT:-8086}
       - gravitee_http_cors_allow-headers=Authorization,Content-Type,X-Requested-With,Accept,Origin,Access-Control-Request-Method,Access-Control-Request-Headers,Cookie
       - gravitee_http_cors_allow-methods=GET,POST,PUT,DELETE,OPTIONS
       - gravitee_http_cors_exposed-headers=X-Total-Count,Set-Cookie
@@ -86,9 +87,6 @@ services:
       # Cookie - same-site localhost over HTTP
       - gravitee_http_cookie_sameSite=Lax
       - gravitee_http_cookie_secure=false
-    # (Enterprise Edition) Agent Management needs a license — mount it here. Empty
-    # GAMMA_LICENSE points at a phantom path that Docker skips; stacker only sets it to a
-    # real file when one is resolved (mirrors apim-license.yml behavior).
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8083/management/v2/ui/bootstrap >/dev/null || exit 1"]
       interval: 10s
@@ -102,9 +100,9 @@ services:
     depends_on:
       - management_api
     ports:
-      - "8084:8080"
+      - "${GAMMA_CONSOLE_PORT:-8084}:8080"
     environment:
-      - MGMT_API_URL=http://localhost:8083/management/organizations/DEFAULT/environments/DEFAULT/
+      - MGMT_API_URL=http://localhost:${GAMMA_MGMT_PORT:-8083}/management/organizations/DEFAULT/environments/DEFAULT/
     networks: [gamma]
 
   portal_ui:
@@ -113,9 +111,9 @@ services:
     depends_on:
       - management_api
     ports:
-      - "8085:8080"
+      - "${GAMMA_PORTAL_PORT:-8085}:8080"
     environment:
-      - PORTAL_API_URL=http://localhost:8083/portal/environments/DEFAULT
+      - PORTAL_API_URL=http://localhost:${GAMMA_MGMT_PORT:-8083}/portal/environments/DEFAULT
     networks: [gamma]
 
   gamma_console:
@@ -124,9 +122,9 @@ services:
     depends_on:
       - management_api
     ports:
-      - "8086:8080"
+      - "${GAMMA_UI_PORT:-8086}:8080"
     environment:
-      - GAMMA_API_URL=http://localhost:8083/gamma
+      - GAMMA_API_URL=http://localhost:${GAMMA_MGMT_PORT:-8083}/gamma
       - GAMMA_CONSOLE_BASE_HREF=/
       - HTTP_PORT=8080
       - SERVER_NAME=localhost

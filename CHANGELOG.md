@@ -4,6 +4,22 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-08-29
+
+### Added
+- **Gamma coexist — named instances.** `gamma_up(instance=…)` now runs several Gamma
+  platforms at once. A named instance gets its own project (`gravitee-gamma-public-<name>`),
+  volumes, and an auto-allocated host-port band (+20000, +40000). All five host ports **and**
+  the baked-in console/CORS URLs are parameterized so they shift together — so a named Gamma
+  runs alongside a canonical standalone `apim_*`/`am_*` (Gamma bundles APIM, so same-band
+  stacks collide → the offset) or a second Gamma **version** side by side. `gamma_status`,
+  `gamma_wait`, `gamma_down`, `gamma_logs`, `gamma_license` all take `instance`; new
+  `gamma_list` enumerates tracked instances. Offset allocation probes real port availability,
+  so a named Gamma lands on a band nothing else holds. Coexist launches emit the
+  browser-cookie-jar warning (open the 2nd console in Incognito). Verified live: two full
+  Gamma platforms (default 8082–8086 + `b` 28082–28086) healthy at once, each console bound
+  to its own shifted mgmt-api port.
+
 ## [0.9.0] — 2026-08-29
 
 ### Added

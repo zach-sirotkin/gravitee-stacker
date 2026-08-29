@@ -85,17 +85,26 @@ The customer-facing Gamma platform from the [Gravitee docs](https://documentatio
 vendored as a self-contained compose (`gamma-compose.yml`) — **public Docker Hub images only**
 (`graviteeio/*`, `graviteeio/gamma-ui`), **no ACR login**, and **no license required** (Agent
 Management is the one module that wants a license; API/AuthZ/Platform Management run without one).
-Single instance, canonical ports **8082–8086** (Gamma console `:8086`, APIM console
-`:8084`, portal `:8085`).
+Canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, portal `:8085`);
+**named instances coexist** on shifted bands (see below).
 
 | Tool           | What it does |
 | -------------- | ------------ |
-| `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). Gamma bundles APIM, so its fixed ports collide with a separate apim/am stack. |
-| `gamma_wait`   | Block until healthy, then return at once (fails fast). Use after `gamma_up` instead of a sleep loop. |
-| `gamma_status` | Overall verdict + per-service health, version, project, URLs. |
-| `gamma_license` | Show the license entitlements (tier/packs/features/expiry) loaded on the running stack — read from the mgmt-api node endpoint. A greyed-out Gamma module means its pack isn't in `packs`. |
-| `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). |
-| `gamma_logs`   | Tail one service (`gateway`, `management_api`, `gamma_console`, …). |
+| `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `instance` (run several at once), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). |
+| `gamma_wait`   | Block until healthy, then return at once (fails fast). Use after `gamma_up` instead of a sleep loop. Takes `instance`. |
+| `gamma_status` | Overall verdict + per-service health, version, project, URLs. Takes `instance`. |
+| `gamma_list`   | List tracked Gamma instances with status/version/ports/URLs (for coexist). |
+| `gamma_license` | Show the license entitlements (tier/packs/features/expiry) loaded on the running stack — read from the mgmt-api node endpoint. A greyed-out Gamma module means its pack isn't in `packs`. Takes `instance`. |
+| `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). Takes `instance`. |
+| `gamma_logs`   | Tail one service (`gateway`, `management_api`, `gamma_console`, …). Takes `instance`. |
+
+**Coexist:** `instance="default"` uses canonical 8082–8086; a named instance gets its own
+project (`gravitee-gamma-public-<name>`), volumes, and an auto-allocated port band
+(+20000, +40000) — all five ports **and** the baked-in console URLs shift together, so a
+named Gamma runs alongside a canonical standalone `apim_*`/`am_*` or a second Gamma
+**version**. Gamma bundles APIM, so two stacks on the *same* band collide (hence the
+offset). Every console is on `localhost`, so coexisting consoles share a browser cookie
+jar — open the second in **Incognito** (`gamma_up` warns on a coexist launch).
 
 ### Standalone APIM stack (`apim_*`)
 

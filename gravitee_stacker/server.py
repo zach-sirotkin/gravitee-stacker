@@ -1038,10 +1038,10 @@ def am_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
 
 
 # ── Public Gamma stack (gamma_*) — self-contained, public images, no ACR ───────
-def _gamma_summarize() -> dict:
-    up = gamma.up_process_status()
-    rows = gamma.compose_ps()
-    expected = gamma.service_names()
+def _gamma_summarize(instance: str = "default") -> dict:
+    up = gamma.up_process_status(instance)
+    rows = gamma.compose_ps(instance)
+    expected = gamma.service_names(instance)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -1065,41 +1065,50 @@ def _gamma_summarize() -> dict:
         overall = "healthy"
     else:
         overall = "partial"
+    offset = up.get("offset") if up.get("offset") is not None else gamma.current_offset(instance)
     return {
         "overall": overall,
-        "version": up.get("version") or gamma.current_version(),
-        "project": gamma.project_for(),
+        "instance": instance,
+        "version": up.get("version") or gamma.current_version(instance),
+        "project": gamma.project_for(instance),
+        "mode": "coexist" if offset else "canonical",
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
-        "urls": gamma.urls(),
-        "up_log_tail": runner.tail_file(gamma.up_log_path(), 40),
+        "urls": gamma.urls_for(offset),
+        "up_log_tail": runner.tail_file(gamma.up_log_path(instance), 40),
         "checked_at": _now_iso(),
     }
 
 
 @mcp.tool()
-def gamma_up(version: str = "latest", pull: bool = True, recreate: bool = False,
-             down_conflicting: bool = False, license: str = "") -> dict:
+def gamma_up(version: str = "latest", instance: str = "default", pull: bool = True,
+             recreate: bool = False, down_conflicting: bool = False, license: str = "") -> dict:
     """Stand up the PUBLIC, self-contained Gravitee Gamma platform (background, non-blocking).
 
     Runs the customer-facing docker-compose from the Gravitee docs — PUBLIC Docker Hub images
     (graviteeio/*, graviteeio/gamma-ui), NO ACR login, and NO license required (Agent Management
-    is the only module that wants one; API/AuthZ/Platform Management run without it). This is the
-    public counterpart to the internal SDK-repo `stack_*` path. Single instance / canonical
-    ports 8082-8086 — Gamma console :8086, APIM console :8084, portal :8085 (all admin/admin).
+    is the only module that wants one; API/AuthZ/Platform Management run without it).
 
-    Returns immediately — then call `gamma_wait()` (or poll `gamma_status()`). On a port conflict
-    it does NOT start (status "port_conflict"); `down_conflicting=true` frees the ports.
+    Instances (generalized coexist): instance="default" uses canonical ports 8082-8086; a named
+    instance gets its own project (gravitee-gamma-public-<name>), its own volumes, and an
+    auto-allocated host-port band (+20000, +40000) — all five ports and the baked-in console
+    URLs shift together. So a named Gamma runs alongside a canonical standalone APIM/AM, or a
+    second Gamma VERSION side by side. Gamma bundles APIM, so two stacks on the SAME band collide;
+    that's why the second one takes an offset. Because every console is on localhost, coexisting
+    consoles SHARE a browser cookie jar — open the second one in Incognito (the result warns).
+
+    Returns immediately — then call `gamma_wait(instance)`. On a port conflict it does NOT start
+    (status "port_conflict"); `down_conflicting=true` frees the ports.
 
     Args:
-        version: image tag — "latest"/"" → 4.12 (the published minor gamma-ui + apim share);
-            or pin e.g. "4.12".
+        version: image tag — "latest"/"" → 4.12 (the published minor gamma-ui + apim share).
+        instance: unique name to run several Gamma stacks at once (default "default").
         pull: pull images before up (default).
         recreate: `up -d --force-recreate`.
-        down_conflicting: down any project holding 8082-8086 first (no -v; data kept).
+        down_conflicting: down any project holding this instance's ports first (no -v; data kept).
         license: OPTIONAL path to a license.key (Agent Management only); empty =
             GAMMA_LICENSE/APIM_LICENSE env, else ~/.gravitee/license.key if present.
     """
@@ -1109,89 +1118,127 @@ def gamma_up(version: str = "latest", pull: bool = True, recreate: bool = False,
     resolved, err = gamma.resolve_version(version)
     if err:
         return {"status": "blocked", "message": err}
-    if gamma.is_up_running() or gamma.stack_running():
-        return {"status": "already_running", "project": gamma.project_for(),
-                "message": "the public Gamma stack is already running. Inspect gamma_status(), "
-                           "stop with gamma_down(), or gamma_up(recreate=True) to force-recreate."}
-    conflicts = gamma.detect_conflicts()
+    if gamma.is_up_running(instance) or gamma.stack_running(instance):
+        return {"status": "already_running", "instance": instance, "project": gamma.project_for(instance),
+                "message": f"Gamma instance '{instance}' is already running. Inspect gamma_status("
+                           f"instance='{instance}'), stop with gamma_down(instance='{instance}'), or run a "
+                           "SECOND stack as a named instance (e.g. instance='b')."}
+    offset = gamma.allocate_offset(instance)
+    if offset is None:
+        return {"status": "blocked",
+                "message": f"no free host-port band for a new Gamma instance (tried offsets up to "
+                           f"{gamma.MAX_OFFSET}). Down an existing instance first (gamma_list to see them)."}
+    plan = gamma.plan_ports(offset)
+    ports = plan["ports"]
+
+    warnings = []
+    if offset:
+        warnings.append(
+            "MULTIPLE CONSOLES SHARE BROWSER COOKIES: this is a second Gamma platform on localhost, "
+            "and browser cookies are scoped by host (not port), so its consoles share one cookie jar "
+            "with the other stack's — signing into one logs you out of the other. Open THIS instance's "
+            "consoles in an Incognito/private window (or a separate browser profile).")
+
+    conflicts = gamma.detect_conflicts(ports, instance)
     downed = []
     if conflicts:
         if not down_conflicting:
-            return {"status": "port_conflict", "version": resolved, "ports": gamma.CANONICAL_PORTS,
-                    "conflicts": conflicts, "conflicting_projects": sorted({c["project"] for c in conflicts}),
-                    "message": (f"port(s) {sorted({c['port'] for c in conflicts})} held by "
-                                f"{sorted({c['project'] for c in conflicts})}. Gamma uses FIXED ports "
-                                "8082-8086 (single instance) — down_conflicting=true to free them. NOTE: "
-                                "Gamma BUNDLES APIM, so a separate apim/am stack on those ports always collides.")}
+            suggest = {"down_the_other": {"tool": "gamma_up",
+                                          "args": {"version": version, "instance": instance, "down_conflicting": True}}}
+            if instance == "default":
+                suggest["run_another_instance"] = {"tool": "gamma_up", "args": {"version": version, "instance": "b"}}
+            return {
+                "status": "port_conflict", "version": resolved, "instance": instance, "offset": offset,
+                "ports": ports, "conflicts": conflicts,
+                "conflicting_projects": sorted({c["project"] for c in conflicts}),
+                "message": (f"port(s) {sorted({c['port'] for c in conflicts})} held by "
+                            f"{sorted({c['project'] for c in conflicts})}. Gamma bundles APIM, so its ports "
+                            "collide with a stack on the same band. down_conflicting=true to free them"
+                            + (", or run a named instance to coexist (e.g. instance='b')." if instance == "default" else ".")),
+                "suggest": suggest,
+            }
         for proj in sorted({c["project"] for c in conflicts}):
             downed.append(gamma.down_project(proj))
+
     license_path, license_src = gamma.resolve_license(license)
-    log_path = gamma.up_log_path()
+    log_path = gamma.up_log_path(instance)
     log_path.write_bytes(b"")
-    proc = gamma.launch_up_background(resolved, pull, recreate, license_path, log_path)
+    proc = gamma.launch_up_background(resolved, offset, pull, recreate, license_path, log_path, instance)
     started = _now_iso()
-    gamma.record_up(proc, resolved, license_path, log_path, started)
+    gamma.record_up(proc, resolved, offset, license_path, log_path, started, instance)
     return {
-        "status": "starting", "version": resolved, "project": gamma.project_for(),
-        "pid": proc.pid, "log_path": str(log_path), "pull": pull, "recreate": recreate,
+        "status": "starting", "version": resolved, "instance": instance,
+        "project": gamma.project_for(instance), "mode": "coexist" if offset else "canonical",
+        "port_offset": offset, "pid": proc.pid, "log_path": str(log_path), "pull": pull, "recreate": recreate,
         "license": {"mounted": bool(license_path), "path": license_path, "source": license_src,
                     "note": "optional — only Agent Management needs it; the rest run without."},
-        "downed_conflicts": downed, "ports": gamma.CANONICAL_PORTS, "urls": gamma.urls(),
-        "started": started,
-        "next": "Call gamma_wait() — it returns the moment the stack is healthy (or fails fast). "
-                "Do NOT write your own sleep loop.",
+        "downed_conflicts": downed, "ports": ports, "urls": gamma.urls_for(offset),
+        "warnings": warnings, "started": started,
+        "next": f"Call gamma_wait(instance='{instance}') — it returns the moment the stack is healthy "
+                "(or fails fast). Do NOT write your own sleep loop.",
     }
 
 
 @mcp.tool()
-def gamma_status() -> dict:
-    """Overall verdict + per-service health for the public Gamma stack (version, project, URLs)."""
-    return _gamma_summarize()
+def gamma_status(instance: str = "default") -> dict:
+    """Overall verdict + per-service health for a Gamma instance (version, project, URLs)."""
+    return _gamma_summarize(instance)
 
 
 @mcp.tool()
-def gamma_license() -> dict:
-    """Show the enterprise license entitlements loaded on the running public Gamma stack.
+def gamma_list() -> dict:
+    """List tracked Gamma instances with their status/version/ports/URLs (for coexist)."""
+    out = []
+    for inst in gamma.known_instances():
+        s = _gamma_summarize(inst)
+        out.append({"instance": inst, "overall": s["overall"], "version": s["version"],
+                    "project": s["project"], "mode": s["mode"], "urls": s["urls"]})
+    return {"status": "ok", "count": len(out), "instances": out}
+
+
+@mcp.tool()
+def gamma_license(instance: str = "default") -> dict:
+    """Show the enterprise license entitlements loaded on a running Gamma instance.
 
     Reads tier / packs / features / expiry from the management-api's node license endpoint.
     A Gamma console module shown as 'Upgrade to access' means its required PACK isn't in the
     license's `packs` (an entitlement gap, not a mount problem). Returns `no_license` for an
     OSS/unlicensed stack, `not_running` if it isn't up.
     """
-    return runner.read_stack_license(gamma.project_for())
+    return runner.read_stack_license(gamma.project_for(instance))
 
 
 @mcp.tool()
-def gamma_wait(timeout_seconds: int = 600, poll_seconds: int = 4) -> dict:
-    """Block until the public Gamma stack is healthy, then return immediately (fails fast on error).
+def gamma_wait(instance: str = "default", timeout_seconds: int = 600, poll_seconds: int = 4) -> dict:
+    """Block until a Gamma instance is healthy, then return immediately (fails fast on error).
 
     Same readiness-aware wait as apim_wait/am_wait. Defaults to a higher ceiling since a
     first-ever pull of the full platform (7 services) is slow. timeout_seconds is a safety
     ceiling, not a fixed wait.
     """
-    return _wait_ready(lambda _inst: _gamma_summarize(), "gamma", timeout_seconds, poll_seconds, "gamma")
+    return _wait_ready(_gamma_summarize, instance, timeout_seconds, poll_seconds, "gamma")
 
 
 @mcp.tool()
-def gamma_down(volumes: bool = False, timeout_seconds: int = 180) -> dict:
-    """Stop the public Gamma stack (`docker compose down`; volumes preserved). volumes=True → `down -v`."""
-    res = gamma.run_down(timeout_seconds, volumes=volumes)
-    gamma.forget_up()
+def gamma_down(instance: str = "default", volumes: bool = False, timeout_seconds: int = 180) -> dict:
+    """Stop a Gamma instance (`docker compose down`; volumes preserved). volumes=True → `down -v`."""
+    res = gamma.run_down(timeout_seconds, instance=instance, volumes=volumes)
+    gamma.forget_up(instance)
     status = "ok" if res.get("returncode") == 0 else ("timeout" if res.get("timed_out") else "error")
-    return {"status": status, "volumes_removed": volumes, "returncode": res.get("returncode"),
-            "stdout": res.get("stdout", ""), "stderr": res.get("stderr", "")}
+    return {"status": status, "instance": instance, "volumes_removed": volumes,
+            "returncode": res.get("returncode"), "stdout": res.get("stdout", ""), "stderr": res.get("stderr", "")}
 
 
 @mcp.tool()
-def gamma_logs(service: str, lines: int = 100) -> dict:
-    """Tail logs for one service of the public Gamma stack (gateway, management_api, gamma_console, …)."""
-    valid = gamma.service_names()
+def gamma_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
+    """Tail logs for one service of a Gamma instance (gateway, management_api, gamma_console, …)."""
+    valid = gamma.service_names(instance)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = gamma.compose_logs(service, lines)
-    return {"status": "ok" if p.returncode == 0 else "error", "service": service, "lines": lines,
-            "returncode": p.returncode, "logs": p.stdout or p.stderr}
+    p = gamma.compose_logs(service, lines, instance)
+    return {"status": "ok" if p.returncode == 0 else "error", "service": service, "instance": instance,
+            "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
 
 
 @mcp.tool()

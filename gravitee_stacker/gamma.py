@@ -3,11 +3,14 @@
 Ships a self-contained compose (``gamma-compose.yml``) built from the CUSTOMER-FACING
 docker-compose in the Gravitee docs — PUBLIC Docker Hub images (``graviteeio/*``,
 ``graviteeio/gamma-ui``), NO ACR, and NO license needed (Agent Management is the one
-module that wants a license; the rest run without one). This is the public counterpart
-to the internal SDK-repo ``stack_*`` path (which needs graviteeio.azurecr.io + run.sh).
+module that wants a license; the rest run without one).
 
-Single instance / canonical ports (8082-8086): gateway 8082, mgmt-api 8083, APIM console
-8084, portal 8085, Gamma console 8086.
+Supports named INSTANCES (generalized coexist): each instance gets its own compose
+project (``-p gravitee-gamma-public[-<name>]``), its own data volumes, and an
+auto-allocated host-port band (+20000, +40000). instance "default" uses canonical ports
+8082-8086; a named instance shifts all five by the offset — the baked-in localhost console
+URLs + CORS origins shift with them. So a named Gamma runs alongside a canonical standalone
+APIM/AM (or another Gamma version). Container-internal ports never change.
 """
 
 from __future__ import annotations
@@ -25,9 +28,19 @@ from . import apim, runner
 _HERE = Path(__file__).resolve().parent
 GAMMA_COMPOSE = _HERE / "gamma-compose.yml"
 GAMMA_LICENSE_COMPOSE = _HERE / "gamma-license.yml"
-PROJECT = "gravitee-gamma-public"
+PROJECT_BASE = "gravitee-gamma-public"
 DEFAULT_VERSION = "4.12"  # gamma-ui/apim images publish on the minor tag in the docs
-CANONICAL_PORTS = [8082, 8083, 8084, 8085, 8086]
+DEFAULT_PORT_OFFSET = 20000
+MAX_OFFSET = 40000  # 8086+40000=48086 stays a valid port; up to ~3 concurrent instances
+
+# (compose env var, canonical host port, url role) for each published port.
+_PORTS = [
+    ("GAMMA_GATEWAY_PORT", 8082, "gateway"),
+    ("GAMMA_MGMT_PORT", 8083, "management API"),
+    ("GAMMA_CONSOLE_PORT", 8084, "console"),
+    ("GAMMA_PORTAL_PORT", 8085, "portal"),
+    ("GAMMA_UI_PORT", 8086, "gamma console"),
+]
 
 
 # ── paths / project / env ─────────────────────────────────────────────────────
@@ -37,16 +50,16 @@ def gamma_state_dir() -> Path:
     return d
 
 
-def project_for() -> str:
-    return PROJECT
+def project_for(instance: str = "default") -> str:
+    return PROJECT_BASE if instance == "default" else f"{PROJECT_BASE}-{instance}"
 
 
-def up_log_path() -> Path:
-    return gamma_state_dir() / "up.log"
+def up_log_path(instance: str = "default") -> Path:
+    return gamma_state_dir() / ("up.log" if instance == "default" else f"up-{instance}.log")
 
 
-def _meta_path() -> Path:
-    return gamma_state_dir() / "up.json"
+def _meta_path(instance: str = "default") -> Path:
+    return gamma_state_dir() / ("up.json" if instance == "default" else f"{instance}.json")
 
 
 def compose_file() -> Path:
@@ -58,8 +71,8 @@ def compose_file() -> Path:
     return GAMMA_COMPOSE
 
 
-def compose_args(with_license: bool = False) -> list[str]:
-    args = ["-p", PROJECT, "-f", str(compose_file())]
+def compose_args(instance: str = "default", with_license: bool = False) -> list[str]:
+    args = ["-p", project_for(instance), "-f", str(compose_file())]
     if with_license:
         args += ["-f", str(GAMMA_LICENSE_COMPOSE)]
     return args
@@ -85,10 +98,45 @@ def resolve_license(license: str = "") -> tuple[Optional[str], Optional[str]]:
     return apim.resolve_license("")
 
 
-def _env(version: str = DEFAULT_VERSION, license_path: Optional[str] = None,
-         extra: Optional[dict] = None) -> dict:
+def plan_ports(offset: int) -> dict:
+    """Host ports + URLs + compose env for a given offset band."""
+    ports = [base + offset for _, base, _ in _PORTS]
+    port_env = {var: str(base + offset) for var, base, _ in _PORTS}
+    urls = {role: base + offset for _, base, role in _PORTS}
+    return {"ports": ports, "port_env": port_env, "urls": urls}
+
+
+def default_offset() -> int:
+    try:
+        return int(os.environ.get("GAMMA_PORT_OFFSET", str(DEFAULT_PORT_OFFSET))) or DEFAULT_PORT_OFFSET
+    except ValueError:
+        return DEFAULT_PORT_OFFSET
+
+
+def allocate_offset(instance: str) -> Optional[int]:
+    """Pick a host-port band. A re-up keeps the instance's existing band; default -> 0
+    (canonical); named -> lowest offset whose ports are free AND not already claimed by
+    another tracked instance (avoids a start-up race). Probing real ports means a named
+    Gamma lands on a band that a standalone APIM/AM isn't already holding."""
+    existing = _rec_for(instance)
+    if existing is not None:
+        return existing.offset
+    if instance == "default":
+        return 0
+    claimed = {r.offset for i in known_instances() if (r := _rec_for(i))}
+    for off in range(DEFAULT_PORT_OFFSET, MAX_OFFSET + 1, DEFAULT_PORT_OFFSET):
+        if off in claimed:
+            continue
+        if not runner.ports_in_use(plan_ports(off)["ports"]):
+            return off
+    return None
+
+
+def _env(version: str = DEFAULT_VERSION, offset: int = 0,
+         license_path: Optional[str] = None, extra: Optional[dict] = None) -> dict:
     env = runner._child_env()
     env["GAMMA_VERSION"] = version
+    env.update(plan_ports(offset)["port_env"])
     if license_path:
         env["GAMMA_LICENSE"] = license_path
     if extra:
@@ -97,9 +145,9 @@ def _env(version: str = DEFAULT_VERSION, license_path: Optional[str] = None,
 
 
 # ── docker compose introspection ──────────────────────────────────────────────
-def compose_ps() -> list[dict]:
+def compose_ps(instance: str = "default") -> list[dict]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(), "ps", "--all", "--format", "json"],
+        ["docker", "compose", *compose_args(instance), "ps", "--all", "--format", "json"],
         cwd=str(gamma_state_dir()), env=_env(),
         capture_output=True, text=True, timeout=30,
     )
@@ -121,17 +169,17 @@ def compose_ps() -> list[dict]:
     return rows
 
 
-def compose_logs(service: str, lines: int) -> subprocess.CompletedProcess:
+def compose_logs(service: str, lines: int, instance: str = "default") -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", *compose_args(), "logs", "--no-color", f"--tail={lines}", service],
+        ["docker", "compose", *compose_args(instance), "logs", "--no-color", f"--tail={lines}", service],
         cwd=str(gamma_state_dir()), env=_env(),
         capture_output=True, text=True, timeout=60,
     )
 
 
-def service_names() -> list[str]:
+def service_names(instance: str = "default") -> list[str]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(), "config", "--services"],
+        ["docker", "compose", *compose_args(instance), "config", "--services"],
         cwd=str(gamma_state_dir()), env=_env(),
         capture_output=True, text=True, timeout=30,
     )
@@ -156,18 +204,19 @@ def project_holding_port(port: int) -> Optional[dict]:
     return None
 
 
-def detect_conflicts() -> list[dict]:
+def detect_conflicts(ports: list[int], instance: str = "default") -> list[dict]:
+    mine = project_for(instance)
     out = []
-    for port in CANONICAL_PORTS:
+    for port in ports:
         holder = project_holding_port(port)
-        if holder and holder["project"] != PROJECT:
+        if holder and holder["project"] != mine:
             out.append(holder)
     return out
 
 
-def stack_running() -> bool:
-    """Whether the Gamma project has RUNNING containers (container-based, authoritative)."""
-    return bool(runner.project_running_containers(PROJECT))
+def stack_running(instance: str = "default") -> bool:
+    """Whether this instance's Gamma project has RUNNING containers (authoritative)."""
+    return bool(runner.project_running_containers(project_for(instance)))
 
 
 def down_project(project: str) -> dict:
@@ -177,9 +226,10 @@ def down_project(project: str) -> dict:
 
 
 # ── up / down lifecycle ───────────────────────────────────────────────────────
-def launch_up_background(version: str, pull: bool, recreate: bool, license_path: Optional[str],
-                         log_path: Path) -> subprocess.Popen:
-    args = compose_args(with_license=bool(license_path))
+def launch_up_background(version: str, offset: int, pull: bool, recreate: bool,
+                         license_path: Optional[str], log_path: Path,
+                         instance: str = "default") -> subprocess.Popen:
+    args = compose_args(instance, with_license=bool(license_path))
     files = " ".join(shlex.quote(a) for a in args)
     up = f"docker compose {files} up -d" + (" --force-recreate" if recreate else "")
     cmd = (f"docker compose {files} pull && {up}") if pull else up
@@ -188,7 +238,8 @@ def launch_up_background(version: str, pull: bool, recreate: bool, license_path:
     fh = open(log_path, "wb")
     try:
         proc = subprocess.Popen(
-            ["bash", "-c", cmd], cwd=str(gamma_state_dir()), env=_env(version, license_path),
+            ["bash", "-c", cmd], cwd=str(gamma_state_dir()),
+            env=_env(version, offset, license_path),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -197,8 +248,8 @@ def launch_up_background(version: str, pull: bool, recreate: bool, license_path:
     return proc
 
 
-def run_down(timeout: int, volumes: bool = False) -> dict:
-    cmd = ["docker", "compose", *compose_args(), "down"] + (["-v"] if volumes else [])
+def run_down(timeout: int, instance: str = "default", volumes: bool = False) -> dict:
+    cmd = ["docker", "compose", *compose_args(instance), "down"] + (["-v"] if volumes else [])
     try:
         p = subprocess.run(cmd, cwd=str(gamma_state_dir()), env=_env(),
                            capture_output=True, text=True, timeout=timeout)
@@ -209,22 +260,25 @@ def run_down(timeout: int, volumes: bool = False) -> dict:
                 "stderr": e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")}
 
 
-def urls() -> dict:
+def urls_for(offset: int) -> dict:
+    p = plan_ports(offset)["urls"]
     return {
-        "gamma console": "http://localhost:8086 (admin/admin)",
-        "APIM console": "http://localhost:8084 (admin/admin)",
-        "portal": "http://localhost:8085",
-        "management API": "http://localhost:8083/management",
-        "gateway": "http://localhost:8082",
+        "gamma console": f"http://localhost:{p['gamma console']} (admin/admin)",
+        "APIM console": f"http://localhost:{p['console']} (admin/admin)",
+        "portal": f"http://localhost:{p['portal']}",
+        "management API": f"http://localhost:{p['management API']}/management",
+        "gateway": f"http://localhost:{p['gateway']}",
     }
 
 
-# ── tracked up-process state ───────────────────────────────────────────────────
+# ── tracked up-process state (per instance) ────────────────────────────────────
 @dataclass
 class GammaUp:
     pid: int
     log_path: str
     version: str
+    offset: int = 0
+    instance: str = "default"
     project: Optional[str] = None
     compose: Optional[str] = None
     license: Optional[str] = None
@@ -232,22 +286,23 @@ class GammaUp:
     exit_code: Optional[int] = None
 
 
-_proc: Optional[subprocess.Popen] = None
-_rec: Optional[GammaUp] = None
+_procs: dict[str, subprocess.Popen] = {}
+_recs: dict[str, GammaUp] = {}
 
 
-def record_up(proc: subprocess.Popen, version: str, license_path: Optional[str],
-              log_path: Path, started: Optional[str]) -> GammaUp:
-    global _proc, _rec
-    rec = GammaUp(pid=proc.pid, log_path=str(log_path), version=version, project=PROJECT,
+def record_up(proc: subprocess.Popen, version: str, offset: int, license_path: Optional[str],
+              log_path: Path, started: Optional[str], instance: str = "default") -> GammaUp:
+    rec = GammaUp(pid=proc.pid, log_path=str(log_path), version=version, offset=offset,
+                  instance=instance, project=project_for(instance),
                   compose=str(compose_file()), license=license_path, started=started)
-    _proc, _rec = proc, rec
-    _meta_path().write_text(json.dumps(asdict(rec), indent=2))
+    _procs[instance] = proc
+    _recs[instance] = rec
+    _meta_path(instance).write_text(json.dumps(asdict(rec), indent=2))
     return rec
 
 
-def _load() -> Optional[GammaUp]:
-    p = _meta_path()
+def _load(instance: str) -> Optional[GammaUp]:
+    p = _meta_path(instance)
     if not p.is_file():
         return None
     try:
@@ -256,41 +311,55 @@ def _load() -> Optional[GammaUp]:
         return None
 
 
-def _rec_for() -> Optional[GammaUp]:
-    return _rec or _load()
+def _rec_for(instance: str) -> Optional[GammaUp]:
+    return _recs.get(instance) or _load(instance)
 
 
-def is_up_running() -> bool:
-    if _proc is not None:
-        return _proc.poll() is None
-    rec = _rec_for()
+def is_up_running(instance: str = "default") -> bool:
+    proc = _procs.get(instance)
+    if proc is not None:
+        return proc.poll() is None
+    rec = _rec_for(instance)
     return runner.pid_alive(rec.pid) if rec else False
 
 
-def up_process_status() -> dict:
-    rec = _rec_for()
+def up_process_status(instance: str = "default") -> dict:
+    rec = _rec_for(instance)
     if rec is None:
         return {"tracked": False}
-    common = {"pid": rec.pid, "version": rec.version, "project": rec.project,
-              "compose": rec.compose, "license": rec.license,
+    common = {"pid": rec.pid, "version": rec.version, "offset": rec.offset, "instance": rec.instance,
+              "project": rec.project, "compose": rec.compose, "license": rec.license,
               "log_path": rec.log_path, "started": rec.started}
-    if _proc is not None:
-        code = _proc.poll()
+    proc = _procs.get(instance)
+    if proc is not None:
+        code = proc.poll()
         if code is not None and rec.exit_code != code:
             rec.exit_code = code
-            _meta_path().write_text(json.dumps(asdict(rec), indent=2))
+            _meta_path(instance).write_text(json.dumps(asdict(rec), indent=2))
         return {"tracked": True, "running": code is None, "exit_code": code, **common}
     running = runner.pid_alive(rec.pid)
     return {"tracked": True, "running": running,
             "exit_code": None if running else rec.exit_code, **common}
 
 
-def forget_up() -> None:
-    global _proc, _rec
-    _proc, _rec = None, None
-    _meta_path().unlink(missing_ok=True)
+def forget_up(instance: str = "default") -> None:
+    _procs.pop(instance, None)
+    _recs.pop(instance, None)
+    _meta_path(instance).unlink(missing_ok=True)
 
 
-def current_version() -> Optional[str]:
-    rec = _rec_for()
+def current_version(instance: str = "default") -> Optional[str]:
+    rec = _rec_for(instance)
     return rec.version if rec else None
+
+
+def current_offset(instance: str = "default") -> int:
+    rec = _rec_for(instance)
+    return rec.offset if rec else 0
+
+
+def known_instances() -> list[str]:
+    names = []
+    for f in gamma_state_dir().glob("*.json"):
+        names.append("default" if f.name == "up.json" else f.stem)
+    return sorted(set(names))
