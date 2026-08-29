@@ -1481,6 +1481,18 @@ def gamma_status() -> dict:
 
 
 @mcp.tool()
+def gamma_license() -> dict:
+    """Show the enterprise license entitlements loaded on the running public Gamma stack.
+
+    Reads tier / packs / features / expiry from the management-api's node license endpoint.
+    A Gamma console module shown as 'Upgrade to access' means its required PACK isn't in the
+    license's `packs` (an entitlement gap, not a mount problem). Returns `no_license` for an
+    OSS/unlicensed stack, `not_running` if it isn't up.
+    """
+    return runner.read_stack_license(gamma.project_for())
+
+
+@mcp.tool()
 def gamma_wait(timeout_seconds: int = 600, poll_seconds: int = 4) -> dict:
     """Block until the public Gamma stack is healthy, then return immediately (fails fast on error).
 
@@ -1511,6 +1523,20 @@ def gamma_logs(service: str, lines: int = 100) -> dict:
     p = gamma.compose_logs(service, lines)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service, "lines": lines,
             "returncode": p.returncode, "logs": p.stdout or p.stderr}
+
+
+@mcp.tool()
+def apim_license(instance: str = "default") -> dict:
+    """Show the enterprise license entitlements loaded on a RUNNING APIM instance.
+
+    Reads tier / packs / features / expiry from the management-api's node license endpoint
+    (auto-resolves the instance's variant). A disabled EE feature or a console module shown as
+    'Upgrade to access' usually means the required PACK isn't in the license's `packs` — an
+    entitlement gap, not a mount/load problem. Returns `no_license` for an OSS/unlicensed stack,
+    `not_running` if the instance isn't up. Also covers the kafka variant.
+    """
+    variant = apim.current_variant(instance) or "default"
+    return runner.read_stack_license(apim.project_for(variant, instance))
 
 
 @mcp.tool()

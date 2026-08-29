@@ -96,6 +96,7 @@ canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, po
 | `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). Gamma bundles APIM, so its fixed ports collide with a separate apim/am stack. |
 | `gamma_wait`   | Block until healthy, then return at once (fails fast). Use after `gamma_up` instead of a sleep loop. |
 | `gamma_status` | Overall verdict + per-service health, version, project, URLs. |
+| `gamma_license` | Show the license entitlements (tier/packs/features/expiry) loaded on the running stack — read from the mgmt-api node endpoint. A greyed-out Gamma module means its pack isn't in `packs`. |
 | `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). |
 | `gamma_logs`   | Tail one service (`gateway`, `management_api`, `gamma_console`, …). |
 
@@ -129,6 +130,7 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 | -------------------- | ------------------------------------------------------------------------------------------------- |
 | `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `features` (see below), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
 | `apim_status`        | Overall verdict + per-service health, pinned version, variant, features, project, and URLs. Takes `instance`. |
+| `apim_license`       | Show the enterprise license entitlements (tier/packs/features/expiry) loaded on a running instance — read from the mgmt-api node endpoint. A disabled EE feature usually means its pack isn't in `packs` (entitlement gap, not a mount problem). |
 | `apim_wait`          | **Block until the stack is actually healthy, then return at once** — the readiness-aware alternative to sleeping in a loop after `apim_up`. Returns the moment `overall` flips to healthy; fails fast on a crashed launcher (`failed`) or nothing running (`down`). `timeout_seconds` is a safety ceiling (raise it for a first-ever pull), not a fixed wait. |
 | `apim_list`          | Tracked APIM instances + status/version/features/URLs — **plus** `other_stacks_on_apim_ports` (quick-setups or untracked stacks actually holding 8082–8085; run-records alone are unreliable, so prefer `stack_preflight` for real occupancy). |
 | `apim_down`          | `docker compose down` (volumes preserved). `volumes=true` → `down -v` (wipe data, e.g. for a clean version downgrade). Takes `instance`.                                        |

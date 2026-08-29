@@ -393,6 +393,60 @@ def project_running_containers(project: str) -> list[str]:
     return [n for n in r.stdout.split() if n] if r.returncode == 0 else []
 
 
+def find_mgmt_api_container(project: str) -> Optional[str]:
+    """Name of the RUNNING management-api container in a compose project (works across the
+    apim/kafka/gamma naming: `...-management-api-1` and gamma's `...-management_api-1`).
+    Excludes the management-UI container."""
+    for n in project_running_containers(project):
+        low = n.lower()
+        if "management-api" in low or "management_api" in low:
+            return n
+    return None
+
+
+def read_stack_license(project: str) -> dict:
+    """Read the enterprise license entitlements from a running stack's management-api, via its
+    node license endpoint (basic admin:adminadmin on the in-container node port 18083). Returns
+    tier/packs/features/expiry, or a no_license/not_running status. Generic across APIM-family
+    stacks (apim, gamma, quicksetups) — pass the compose project name."""
+    import json as _json
+
+    cid = find_mgmt_api_container(project)
+    if not cid:
+        return {"status": "not_running", "project": project,
+                "message": f"no running management-api container for project '{project}' — is the stack up?"}
+    # Try the node license endpoint (both known paths); succeed on the first body carrying a licenseId.
+    script = ('for u in http://localhost:18083/_node/license http://localhost:18083/license; do '
+              'body=$(curl -s -u admin:adminadmin "$u" 2>/dev/null); '
+              'case "$body" in *licenseId*) printf "%s" "$body"; exit 0;; esac; done; exit 3')
+    try:
+        p = subprocess.run(["docker", "exec", cid, "sh", "-c", script],
+                           capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "project": project, "container": cid,
+                "message": "timed out querying the node license endpoint."}
+    if p.returncode != 0 or "licenseId" not in (p.stdout or ""):
+        return {"status": "no_license", "project": project, "container": cid,
+                "message": "management-api is running but no enterprise license is loaded (OSS mode), "
+                           "or the node license endpoint is unreachable."}
+    try:
+        lic = _json.loads(p.stdout.strip())
+    except _json.JSONDecodeError:
+        return {"status": "error", "project": project, "container": cid, "raw": p.stdout[:400]}
+    packs = [x.strip() for x in (lic.get("packs") or "").split(",") if x.strip()]
+    features = [x.strip() for x in (lic.get("features") or "").split(",") if x.strip()]
+    return {
+        "status": "ok", "project": project, "container": cid,
+        "tier": lic.get("tier"), "packs": packs, "features": features,
+        "entitlements": sorted(set(packs + features)),
+        "expiryDate": lic.get("expiryDate"), "licenseId": lic.get("licenseId"),
+        "company": lic.get("company"), "email": lic.get("email"),
+        "note": "packs + features are this license's enterprise entitlements. A console module shown "
+                "as 'Upgrade to access' means its required pack is NOT in this list — an entitlement "
+                "gap, not a mount/load problem.",
+    }
+
+
 def pid_alive(pid: Optional[int]) -> bool:
     if not pid:
         return False
