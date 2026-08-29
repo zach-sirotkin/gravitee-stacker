@@ -1,0 +1,133 @@
+# Public, self-contained Gravitee Gamma platform — the CUSTOMER-FACING docker-compose from
+# the Gravitee docs (documentation.gravitee.io/gravitee-gamma/.../docker/docker-compose),
+# adapted for stacker:
+#   * image tags parameterized via ${GAMMA_VERSION:-4.12};
+#   * container_name / fixed network name dropped so `-p <project>` isolates + cleans up;
+#   * healthchecks added (mongo/es/mgmt-api) so stacker's health-based status/wait work.
+# PUBLIC Docker Hub images ONLY — NO ACR, and NO license needed (Agent Management is the one
+# module that needs a license; API/AuthZ/Platform Management all run without one). This is the
+# self-contained counterpart to the private SDK-repo `stack_*` path (graviteeio.azurecr.io).
+# Ports 8082-8086 are canonical/fixed (single instance): gateway 8082, mgmt-api 8083,
+# console 8084, portal 8085, gamma console 8086.
+networks:
+  gamma: {}
+volumes:
+  mongo-data:
+  es-data:
+services:
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [gamma]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.2
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [gamma]
+
+  gateway:
+    image: graviteeio/apim-gateway:${GAMMA_VERSION:-4.12}
+    restart: unless-stopped
+    depends_on:
+      mongodb: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+    ports:
+      - "8082:8082"
+    environment:
+      # Turn on Gamma in the Gateway (required for AuthZ policy/PDP sync)
+      - gravitee_gamma_enabled=true
+      - gravitee_management_mongodb_uri=mongodb://mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_ratelimit_mongodb_uri=mongodb://mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_reporters_elasticsearch_endpoints_0=http://elasticsearch:9200
+    networks: [gamma]
+
+  management_api:
+    image: graviteeio/apim-management-api:${GAMMA_VERSION:-4.12}
+    restart: unless-stopped
+    depends_on:
+      mongodb: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+    ports:
+      - "8083:8083"
+    environment:
+      # Turn on Gamma in the Management API
+      - gravitee_gamma_enabled=true
+      - gravitee_management_mongodb_uri=mongodb://mongodb:27017/gravitee?serverSelectionTimeoutMS=5000&connectTimeoutMS=5000&socketTimeoutMS=5000
+      - gravitee_analytics_elasticsearch_endpoints_0=http://elasticsearch:9200
+      - gravitee_installation_standalone_console_url=http://localhost:8084
+      - gravitee_installation_standalone_portal_url=http://localhost:8085
+      # CORS - allow the console origins with credentials (one-host cross-port login)
+      - gravitee_http_cors_enabled=true
+      - gravitee_http_cors_allow-origin_0=http://localhost:8084
+      - gravitee_http_cors_allow-origin_1=http://localhost:8085
+      - gravitee_http_cors_allow-origin_2=http://localhost:8086
+      - gravitee_http_cors_allow-headers=Authorization,Content-Type,X-Requested-With,Accept,Origin,Access-Control-Request-Method,Access-Control-Request-Headers,Cookie
+      - gravitee_http_cors_allow-methods=GET,POST,PUT,DELETE,OPTIONS
+      - gravitee_http_cors_exposed-headers=X-Total-Count,Set-Cookie
+      - gravitee_http_cors_allow-credentials=true
+      # Cookie - same-site localhost over HTTP
+      - gravitee_http_cookie_sameSite=Lax
+      - gravitee_http_cookie_secure=false
+    # (Enterprise Edition) Agent Management needs a license — mount it here. Empty
+    # GAMMA_LICENSE points at a phantom path that Docker skips; stacker only sets it to a
+    # real file when one is resolved (mirrors apim-license.yml behavior).
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/management/v2/ui/bootstrap >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+    networks: [gamma]
+
+  management_ui:
+    image: graviteeio/apim-management-ui:${GAMMA_VERSION:-4.12}
+    restart: unless-stopped
+    depends_on:
+      - management_api
+    ports:
+      - "8084:8080"
+    environment:
+      - MGMT_API_URL=http://localhost:8083/management/organizations/DEFAULT/environments/DEFAULT/
+    networks: [gamma]
+
+  portal_ui:
+    image: graviteeio/apim-portal-ui:${GAMMA_VERSION:-4.12}
+    restart: unless-stopped
+    depends_on:
+      - management_api
+    ports:
+      - "8085:8080"
+    environment:
+      - PORTAL_API_URL=http://localhost:8083/portal/environments/DEFAULT
+    networks: [gamma]
+
+  gamma_console:
+    image: graviteeio/gamma-ui:${GAMMA_VERSION:-4.12}
+    restart: unless-stopped
+    depends_on:
+      - management_api
+    ports:
+      - "8086:8080"
+    environment:
+      - GAMMA_API_URL=http://localhost:8083/gamma
+      - GAMMA_CONSOLE_BASE_HREF=/
+      - HTTP_PORT=8080
+      - SERVER_NAME=localhost
+    networks: [gamma]

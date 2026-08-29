@@ -1,0 +1,7 @@
+# Optional license overlay for the public Gamma stack — layered via `-f` only when a real
+# license file is resolved (mirrors apim-license.yml). Mounts it into the management-api,
+# which is what Agent Management reads. All other Gamma modules run without it.
+services:
+  management_api:
+    volumes:
+      - ${GAMMA_LICENSE}:/opt/graviteeio-management-api/license/license.key:ro

@@ -82,12 +82,30 @@ The stack families listed above, tool by tool. Two meta tools first:
 (3) on a conflict, offer **down the other stack** vs **coexist** (a named instance); then
 `apim_up`/`am_up`.
 
+### Public Gamma stack (`gamma_*`) — self-contained, no ACR, no license
+
+The customer-facing Gamma platform from the [Gravitee docs](https://documentation.gravitee.io/gravitee-gamma/platform-management/install/self-hosted-installation-guides/docker/docker-compose),
+vendored as a self-contained compose (`gamma-compose.yml`) — **public Docker Hub images only**
+(`graviteeio/*`, `graviteeio/gamma-ui`), **no ACR login**, and **no license required** (Agent
+Management is the one module that wants a license; API/AuthZ/Platform Management run without one).
+This is the public counterpart to the Gravitee-internal `stack_*` path below. Single instance,
+canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, portal `:8085`).
+
+| Tool           | What it does |
+| -------------- | ------------ |
+| `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). Gamma bundles APIM, so its fixed ports collide with a separate apim/am stack. |
+| `gamma_wait`   | Block until healthy, then return at once (fails fast). Use after `gamma_up` instead of a sleep loop. |
+| `gamma_status` | Overall verdict + per-service health, version, project, URLs. |
+| `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). |
+| `gamma_logs`   | Tail one service (`gateway`, `management_api`, `gamma_console`, …). |
+
 ### Gamma stack (`stack_*`) — Gravitee-internal
 
 > **⚠️ Gravitee employees only.** These tools wrap `run.sh` from the **private**
 > `gravitee-gamma-modules-sdk` repo and pull images from Gravitee's private registry — they
-> won't work without Gravitee access. The rest of the tool (APIM, AM, quick-setups,
-> plugins) needs none of this and runs on public images/resources.
+> won't work without Gravitee access. **For most uses prefer the public `gamma_*` stack above**
+> — it needs none of this. The rest of the tool (APIM, AM, quick-setups, plugins) also runs on
+> public images/resources.
 
 | Tool                     | What it does                                                                                 |
 | ------------------------ | -------------------------------------------------------------------------------------------- |
