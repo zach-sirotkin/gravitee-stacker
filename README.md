@@ -21,10 +21,9 @@ launch any release on command, run several at once, no hand-rolled compose files
 - **Any official quick-setup** (`quicksetup_*`) — fetch and run any of the ~two dozen
   upstream `docker/quick-setup/*` configs (mongodb, postgresql, keycloak, native-kafka,
   opensearch, prometheus, …) on demand, with known-gotcha auto-fixes.
-- **Gamma demo** (`stack_*`) — **⚠️ Gravitee-internal only.** A thin wrapper over the
-  Gamma SDK's `docker/run.sh`; needs the **private** `gravitee-gamma-modules-sdk` repo and
-  Gravitee's private registry, so it won't work outside Gravitee. Everything else above runs
-  on public resources.
+- **Gamma platform** (`gamma_*`) — the full customer-facing Gamma platform (Agent /
+  Authorization / Event / Edge Management on top of APIM) from a self-contained compose;
+  public images, no ACR, no license required. Everything the tool runs is public.
 
 APIM and AM support **named instances** so you can run multiple stacks of the same kind
 at once (generalized coexist) — feature ports shift with the instance, so composed stacks
@@ -58,12 +57,10 @@ what's ready and what's missing for each stack.
 
 | Thing | Where | Needed for |
 | ----- | ----- | ---------- |
-| **Gravitee license** (optional) | `~/.gravitee/license.key` — `mkdir -p ~/.gravitee && cp <your-license>.key ~/.gravitee/license.key` | Enterprise features on APIM. Without it APIM runs in **OSS mode**. Auto-detected; no config needed. |
-| **Gamma SDK repo** *(Gravitee-internal)* | Clone the private `gravitee-gamma-modules-sdk`, then set `GAMMA_STACK_DIR` to its path (default `~/gravitee-gamma-modules-sdk`) | The **Gamma** stack only (`stack_*`) — needs Gravitee access. APIM/AM/quick-setups/plugins don't. |
-| **Registry login** *(Gravitee-internal)* | `az acr login --name graviteeio` | The **Gamma** stack only — its images are on Gravitee's private registry. |
+| **Gravitee license** (optional) | `~/.gravitee/license.key` — `mkdir -p ~/.gravitee && cp <your-license>.key ~/.gravitee/license.key` | Enterprise features on any stack. Without it stacks run in **OSS mode**. Auto-detected + auto-mounted; no config needed. |
 
-> APIM images are public (`graviteeio/apim-*`) — no login needed. A license is optional.
-> So if you only want APIM, step 4 is the whole setup.
+> All images are public (`graviteeio/*`) — no registry login needed for any stack. A
+> license is optional. So step 4 is the whole setup.
 
 Nothing secret is committed: `.venv/` and `.run/` (per-stack state + logs) are gitignored,
 and this project never touches the Gamma SDK repo's working tree.
@@ -88,8 +85,8 @@ The customer-facing Gamma platform from the [Gravitee docs](https://documentatio
 vendored as a self-contained compose (`gamma-compose.yml`) — **public Docker Hub images only**
 (`graviteeio/*`, `graviteeio/gamma-ui`), **no ACR login**, and **no license required** (Agent
 Management is the one module that wants a license; API/AuthZ/Platform Management run without one).
-This is the public counterpart to the Gravitee-internal `stack_*` path below. Single instance,
-canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, portal `:8085`).
+Single instance, canonical ports **8082–8086** (Gamma console `:8086`, APIM console
+`:8084`, portal `:8085`).
 
 | Tool           | What it does |
 | -------------- | ------------ |
@@ -99,26 +96,6 @@ canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, po
 | `gamma_license` | Show the license entitlements (tier/packs/features/expiry) loaded on the running stack — read from the mgmt-api node endpoint. A greyed-out Gamma module means its pack isn't in `packs`. |
 | `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). |
 | `gamma_logs`   | Tail one service (`gateway`, `management_api`, `gamma_console`, …). |
-
-### Gamma stack (`stack_*`) — Gravitee-internal
-
-> **⚠️ Gravitee employees only.** These tools wrap `run.sh` from the **private**
-> `gravitee-gamma-modules-sdk` repo and pull images from Gravitee's private registry — they
-> won't work without Gravitee access. **For most uses prefer the public `gamma_*` stack above**
-> — it needs none of this. The rest of the tool (APIM, AM, quick-setups, plugins) also runs on
-> public images/resources.
-
-| Tool                     | What it does                                                                                 |
-| ------------------------ | -------------------------------------------------------------------------------------------- |
-| `stack_up`               | Launches `run.sh` **in the background** (pull + `up -d` + health poll), returns immediately. |
-| `stack_status`           | Two independent signals: is the tracked up-process alive, **and** `docker compose ps` health. Returns `starting`/`healthy`/`partial`/`down`/`failed`, per-service state, and the tail of `up.log`. |
-| `stack_wait`             | Block until the Gamma stack is healthy, then return at once (fails fast on error). Use it after `stack_up` instead of a sleep loop or watching the `run.sh` PID. Defaults to a higher ceiling than APIM/AM since the first Gamma build is slow. |
-| `stack_setup`            | Runs `run.sh setup` in the foreground (configurable timeout, default 5 min).                  |
-| `stack_down`             | Runs `run.sh down` (`docker compose down`).                                                   |
-| `stack_logs`             | `docker compose logs --tail=<lines> <service>` for one validated service.                     |
-| `stack_ports`            | Shows the Gamma stack's canonical host ports + access URLs.                                   |
-| `stack_install_daemon`   | **Returns the command to run yourself** — does not execute (it self-elevates via sudo).      |
-| `stack_uninstall_daemon` | Same treatment as install.                                                                    |
 
 ### Standalone APIM stack (`apim_*`)
 
@@ -379,30 +356,23 @@ work. For a coordination-free sanity check, read the broker directly with
 
 ### The background-process design (the important part)
 
-`stack_up` uses `subprocess.Popen` (never `subprocess.run`), redirects stdout+stderr
-to `.run/up.log`, records the PID + log path, and returns `{status: "starting", pid,
-log_path}` **without waiting**. That's what keeps cold image pulls from timing out
-your MCP client. You then poll `stack_status` to learn when the stack is actually
-ready. Only one up-process is allowed at a time.
+Every `*_up` uses `subprocess.Popen` (never `subprocess.run`), redirects stdout+stderr
+to `.run/<stack>/up.log`, records the PID + log path, and returns `{status: "starting",
+pid, log_path}` **without waiting**. That's what keeps cold image pulls from timing out
+your MCP client. You then call `*_wait` (or poll `*_status`) to learn when the stack is
+actually ready.
 
-`stack_status` reports liveness two ways and shows both: (1) `popen.poll()` /
-PID-liveness of the tracked up-process, and (2) real health parsed from
-`docker compose ps`. Init containers that exit 0 (`spire-perms-init`,
-`spire-bootstrap`) are treated as *completed*, not failed.
-
-> **Compose files:** this server mirrors `run.sh` exactly — the effective set is
-> `-f docker-compose.yml` (which pulls in `docker-compose.apim.yml` via an
-> `include:` directive) plus `-f docker-compose.esm.yml` **only when `ESM_MESH` is
-> set**. The service list is read live via `docker compose config --services`, so it
-> never drifts from the actual compose files.
+`*_status` reports liveness two ways and shows both: (1) PID-liveness of the tracked
+up-process, and (2) real health parsed from `docker compose ps` (the authoritative
+signal — the launcher exits the moment `up -d` returns). The service list is read live
+via `docker compose config --services`, so it never drifts from the actual compose files.
 
 ## Configuration
 
 | Env var          | Default                                                     | Meaning                                    |
 | ---------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| `GAMMA_STACK_DIR`| `~/gravitee-gamma-modules-sdk` (override this) | Path to your checkout of the stack repo. All Gamma calls run in `$GAMMA_STACK_DIR/docker`. |
-| `ESM_MESH`       | unset                                                      | If set, adds the ESM Kafka-mesh overlay (matches `run.sh`). |
-| `REGISTRY`       | `graviteeio.azurecr.io`                                    | Passed through to `run.sh`. Set `graviteeio` for the public hub. |
+| `GAMMA_VERSION`  | `4.12`                                                     | Image minor tag for the public Gamma stack (overridden by `gamma_up`'s `version` arg). |
+| `GAMMA_COMPOSE_FILE` | shipped `gamma-compose.yml`                            | Point at your own Gamma compose instead of the bundled one. |
 | `APIM_PORT_OFFSET` | `20000`                                                 | Host-port band size for named APIM instances (coexist). |
 | `APIM_LICENSE`   | unset                                                      | Default license path for the APIM stack (overridden by `apim_up`'s `license` arg). |
 | `APIM_COMPOSE_FILE` | shipped `apim-compose.yml`                            | Point at your own APIM compose to use instead of the bundled one (see below). |
@@ -425,23 +395,20 @@ file. Two ways to change it safely:
 
 ### Ports
 
-- **Gamma is canonical-ports-only** — its consoles hardcode host-routing on `:80`, so
-  remapping breaks the UIs (strict by design). `stack_up` pre-checks and returns
-  `port_conflict` without starting if a port is taken. UIs: `http://gamma.localhost`,
-  `apim.localhost`, `portal.localhost`, `am.localhost` (all via nginx on `:80`).
+- **Gamma is canonical-ports-only** (single instance) — fixed `8082–8086`. `gamma_up`
+  pre-checks and returns `port_conflict` without starting if a port is taken. Because
+  Gamma bundles APIM, its ports collide with a separate `apim_*`/`am_*` stack.
 - **APIM & AM coexist** via named `instance`s — see [Running multiple stacks](#running-multiple-stacks-at-once-generalized-coexist).
 
 Runtime state (up-process metadata + `up.log`, per stack) lives in this project's `.run/`
-(gitignored), out of the stack repo. `run.sh` runs with `cwd = $GAMMA_STACK_DIR/docker`.
+(gitignored).
 
-### Prerequisites (surfaced by `stack_up`'s pre-flight)
+### Prerequisites
 
-- **Docker Desktop running** (`docker info` must succeed).
-- **ACR login** (`az acr login --name graviteeio`) — or set `REGISTRY=graviteeio` in
-  `docker/.env` to use the public hub.
-- A **license** at `docker/license/license.key`.
+- **Docker Desktop running** (`docker info` must succeed) — that's it. All images are
+  public; a Gravitee license at `~/.gravitee/license.key` is optional (enterprise features).
 
-`stack_up` checks these first and returns a clear message instead of a cryptic
+Each `*_up` checks Docker first and returns a clear message instead of a cryptic
 mid-startup failure.
 
 ## Install / run
@@ -452,8 +419,7 @@ mid-startup failure.
 > pipx install "git+https://github.com/zach-sirotkin/gravitee-stacker@v0.7.2"
 > ```
 > Use **≥ v0.7.2** — earlier wheels don't cap the `mcp` dependency and break on a fresh
-> install now that `mcp` 2.0 is out. (The `stack_*` Gamma tools are Gravitee-internal — see
-> above; everything else works for anyone.)
+> install now that `mcp` 2.0 is out. Everything runs on public images; no Gravitee access needed.
 
 For local development, clone and install editable:
 
@@ -467,10 +433,9 @@ python3 -m venv .venv          # Python 3.10+
 Run the server directly (stdio transport):
 
 ```bash
-GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk \
-  ./.venv/bin/python -m gravitee_stacker.server
+./.venv/bin/python -m gravitee_stacker.server
 # or, via the installed console script:
-GAMMA_STACK_DIR=/path/to/gravitee-gamma-modules-sdk ./.venv/bin/gravitee-stacker
+./.venv/bin/gravitee-stacker
 ```
 
 ## Wire it into a client
@@ -480,11 +445,10 @@ Both use stdio transport and point at the venv's Python so no activation is need
 ### Claude Code
 
 The one-liner (user scope → available in every project). Point at the venv's console
-script and set `GAMMA_STACK_DIR`:
+script — no env vars needed:
 
 ```bash
 claude mcp add gravitee-stacker -s user \
-  -e GAMMA_STACK_DIR=/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk \
   -- /ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker
 ```
 
@@ -501,8 +465,7 @@ Equivalently, add to `~/.claude.json` (user scope) or a project `.mcp.json` by h
 {
   "mcpServers": {
     "gravitee-stacker": {
-      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker",
-      "env": { "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk" }
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker"
     }
   }
 }
@@ -516,8 +479,8 @@ Notes:
 - **Editable install ⇒ no reinstall on edits.** If you installed with `pip install -e .`,
   the console script runs the source tree in place — after changing the code, just
   restart the session (or toggle the server) to load it.
-- **Paths must be absolute** — MCP clients don't expand `~`/`$HOME`. `GAMMA_STACK_DIR` is
-  only needed for the Gamma `stack_*` tools; APIM/AM/quick-setup need only Docker.
+- **Paths must be absolute** — MCP clients don't expand `~`/`$HOME`. No env vars are
+  required; every stack needs only Docker.
 - Prefer a PATH-stable install decoupled from the dev venv? `pipx install
   /path/to/gravitee-stacker`, then set `command` to just `gravitee-stacker` (rebuild on
   changes with `pipx reinstall`).
@@ -530,8 +493,7 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project) — same bl
 {
   "mcpServers": {
     "gravitee-stacker": {
-      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker",
-      "env": { "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk" }
+      "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker"
     }
   }
 }
@@ -551,7 +513,6 @@ the config at launch):
     "gravitee-stacker": {
       "command": "/ABSOLUTE/PATH/TO/gravitee-stacker/.venv/bin/gravitee-stacker",
       "env": {
-        "GAMMA_STACK_DIR": "/ABSOLUTE/PATH/TO/gravitee-gamma-modules-sdk",
         "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
       }
     }
@@ -573,13 +534,13 @@ both — so if it works there but not in Desktop, it's one of these):
 
 ## Typical flow
 
-Gamma demo stack:
+Public Gamma platform:
 ```
-stack_up                       → { status: "starting", pid, log_path }   (canonical ports)
-stack_status   (repeat)        → overall: starting → … → healthy
-stack_setup                    → bootstraps the demo (after healthy)
-stack_logs("apim-rest-api")    → tail a service
-stack_down                     → tears the stack down
+gamma_up                       → { status: "starting", pid, log_path }   (canonical 8082–8086)
+gamma_wait                     → returns the moment it's healthy
+gamma_license                  → tier / packs / features loaded on the stack
+gamma_logs("gamma_console")    → tail a service
+gamma_down                     → tears the stack down
 ```
 
 Standalone APIM stack (guided launch):

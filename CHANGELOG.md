@@ -4,6 +4,29 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-08-29
+
+### Added
+- **Public Gamma platform (`gamma_*`).** A self-contained Gamma stack built from the
+  customer-facing docker-compose in the Gravitee docs — public Docker Hub images
+  (`graviteeio/*`, `graviteeio/gamma-ui`), **no ACR, no license required**. Tools:
+  `gamma_up` / `gamma_wait` / `gamma_status` / `gamma_down` / `gamma_logs`. Vendored as
+  `gamma-compose.yml` (+ optional `gamma-license.yml` overlay), version-parameterized,
+  project-isolated, with healthchecks so status/wait work.
+- **License inspectors `apim_license` + `gamma_license`.** Surface a running stack's
+  entitlements (tier / packs / features / expiry) from the management-api node license
+  endpoint — so "is it my license / why is this module greyed out?" is one call. Backed by
+  a generic `runner.read_stack_license(project)`.
+
+### Removed
+- **The Gravitee-internal Gamma SDK path (`stack_*`).** Superseded by the public `gamma_*`
+  family, which needs none of its private dependencies. Dropped `stack_up`, `stack_status`,
+  `stack_wait`, `stack_setup`, `stack_down`, `stack_logs`, `stack_ports`,
+  `stack_install_daemon`, `stack_uninstall_daemon`, the `state` module, and the
+  `run.sh`/`GAMMA_STACK_DIR`/ACR plumbing in `runner.py`. **`stack_preflight` stays** (it's
+  the APIM/AM guided-launch helper, unrelated to the SDK). `GAMMA_STACK_DIR`, `ESM_MESH`,
+  and `REGISTRY` env vars are no longer used; `GAMMA_MCP_STATE_DIR` still applies.
+
 ## [0.8.7] — 2026-08-20
 
 ### Added
