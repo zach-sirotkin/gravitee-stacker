@@ -21,14 +21,13 @@ launch any release on command, run several at once, no hand-rolled compose files
 - **Any official quick-setup** (`quicksetup_*`) — fetch and run any of the ~two dozen
   upstream `docker/quick-setup/*` configs (mongodb, postgresql, keycloak, native-kafka,
   opensearch, prometheus, …) on demand, with known-gotcha auto-fixes.
-- **Gamma platform** (`gamma_*`) — the full customer-facing Gamma platform (Agent /
-  Authorization / Event / Edge Management on top of APIM) from a self-contained compose;
-  public images, no ACR, no license required. Everything the tool runs is public.
+- **Gamma platform** (`gamma_*`) — the full Gamma platform (Agent / Authorization /
+  Event / Edge Management on top of APIM) from a self-contained compose.
 
-APIM and AM support **named instances** so you can run multiple stacks of the same kind
-at once (generalized coexist) — feature ports shift with the instance, so composed stacks
-coexist too. A guided-launch helper (`stack_preflight`) resolves the version, checks
-ports, and offers down-vs-coexist on a conflict.
+APIM, AM, and Gamma support **named instances** so you can run several stacks of the same
+kind at once — ports shift with the instance so they coexist. A guided-launch helper
+(`stack_preflight`) resolves the version, checks ports, and offers down-vs-coexist on a
+conflict.
 
 ## Quickstart
 
@@ -59,11 +58,7 @@ what's ready and what's missing for each stack.
 | ----- | ----- | ---------- |
 | **Gravitee license** (optional) | `~/.gravitee/license.key` — `mkdir -p ~/.gravitee && cp <your-license>.key ~/.gravitee/license.key` | Enterprise features on any stack. Without it stacks run in **OSS mode**. Auto-detected + auto-mounted; no config needed. |
 
-> All images are public (`graviteeio/*`) — no registry login needed for any stack. A
-> license is optional. So step 4 is the whole setup.
-
-Nothing secret is committed: `.venv/` and `.run/` (per-stack state + logs) are gitignored,
-and this project never touches the Gamma SDK repo's working tree.
+> A license is optional; images are pulled from Docker Hub. So step 4 is the whole setup.
 
 ## What it exposes
 
@@ -71,7 +66,7 @@ The stack families listed above, tool by tool. Two meta tools first:
 
 | Tool              | What it does                                                                                          |
 | ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `doctor`          | One-call readiness check (Docker, license, Gamma SDK) — what's set up and what's missing. Run it first. |
+| `doctor`          | One-call readiness check (Docker, license) — what's set up and what's missing. Run it first. |
 | `stack_preflight` | Guided-launch preview (no side effects): resolves the version, computes the ports, checks conflicts, and returns the options — `start`, or on conflict `down_conflicting` vs `coexist`. Use it to ask the user which path before launching. |
 
 **Recommended launch flow:** when asked to bring up a stack, (1) confirm the **version**
@@ -79,14 +74,13 @@ The stack families listed above, tool by tool. Two meta tools first:
 (3) on a conflict, offer **down the other stack** vs **coexist** (a named instance); then
 `apim_up`/`am_up`.
 
-### Public Gamma stack (`gamma_*`) — self-contained, no ACR, no license
+### Gamma platform (`gamma_*`)
 
-The customer-facing Gamma platform from the [Gravitee docs](https://documentation.gravitee.io/gravitee-gamma/platform-management/install/self-hosted-installation-guides/docker/docker-compose),
-vendored as a self-contained compose (`gamma-compose.yml`) — **public Docker Hub images only**
-(`graviteeio/*`, `graviteeio/gamma-ui`), **no ACR login**, and **no license required** (Agent
-Management is the one module that wants a license; API/AuthZ/Platform Management run without one).
-Canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, portal `:8085`);
-**named instances coexist** on shifted bands (see below).
+The full Gamma platform (`gamma-compose.yml`: gateway + management-api + APIM console +
+portal + Gamma console + mongo + es), from the [Gravitee docs](https://documentation.gravitee.io/gravitee-gamma/platform-management/install/self-hosted-installation-guides/docker/docker-compose).
+Canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, portal
+`:8085`); named instances coexist on shifted bands (see below). A license is optional —
+only Agent Management needs one.
 
 | Tool           | What it does |
 | -------------- | ------------ |
@@ -98,13 +92,11 @@ Canonical ports **8082–8086** (Gamma console `:8086`, APIM console `:8084`, po
 | `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). Takes `instance`. |
 | `gamma_logs`   | Tail one service (`gateway`, `management_api`, `gamma_console`, …). Takes `instance`. |
 
-**Coexist:** `instance="default"` uses canonical 8082–8086; a named instance gets its own
-project (`gravitee-gamma-public-<name>`), volumes, and an auto-allocated port band
-(+20000, +40000) — all five ports **and** the baked-in console URLs shift together, so a
-named Gamma runs alongside a canonical standalone `apim_*`/`am_*` or a second Gamma
-**version**. Gamma bundles APIM, so two stacks on the *same* band collide (hence the
-offset). Every console is on `localhost`, so coexisting consoles share a browser cookie
-jar — open the second in **Incognito** (`gamma_up` warns on a coexist launch).
+**Coexist:** a named instance gets its own project + volumes + auto-allocated port band
+(+20000, +40000) — all five ports and the console URLs shift together, so a named Gamma
+runs alongside a standalone `apim_*`/`am_*` or a second Gamma **version**. (Gamma bundles
+APIM, so same-band stacks collide.) Coexisting consoles share the `localhost` cookie jar
+— open the second in **Incognito** (`gamma_up` warns).
 
 ### Standalone APIM stack (`apim_*`)
 
@@ -137,7 +129,7 @@ combine cleanly and mix freely:
 | `prometheus` | a Prometheus that scrapes the gateway's metrics endpoint | Prometheus UI on **:9090** |
 | `redis-rate-limit` | points the gateway's rate-limit store at a bundled Redis | internal (no host port) |
 | `debug-logging` **(on by default)** | verbose `DEBUG` logs from the gateway + management-api (`io.gravitee` at DEBUG, via a bundled `logback-debug.xml`) | via `apim_logs` |
-| `alert-engine` **(EE license)** | Gravitee Alert Engine wired to the gateway **container-to-container** on the shared network (`ws_discovery=false`) — the fix the upstream `ee-with-alert-engine` quick-setup lacks, where AE is isolated and never receives events. Verified end-to-end (evaluation + notification + delivery). | node API on **:18072** (`/_node/*`); create alerts in the console |
+| `alert-engine` **(EE license)** | Gravitee Alert Engine wired to the gateway **container-to-container** on the shared network (`ws_discovery=false`), so it receives gateway events. | node API on **:18072** (`/_node/*`); create alerts in the console |
 
 **Alert Engine — one gotcha to know.** After a **fresh-volume** start, restart the gateway
 once the stack is healthy — **`apim_alert_engine_fix(instance)`** — or alerts *silently*
@@ -174,10 +166,9 @@ apim_up(variant="kafka", features=["prometheus", "redis-rate-limit"])
 ```
 …gives a native-Kafka gateway **with** Prometheus scraping **and** Redis rate-limiting in
 one stack. Features are **coexist-safe**: a named `instance` shifts the feature ports too
-(prometheus → 29090 at +20000), so composed stacks run side by side. These are the
-curated, mix-and-match counterpart to the run-upstream-verbatim `quicksetup_*` configs —
-reach for `features` when you want to *combine* capabilities and coexist; reach for
-`quicksetup_*` for one-off fidelity to a specific upstream config.
+(prometheus → 29090 at +20000), so composed stacks run side by side. Reach for `features`
+to *combine* capabilities and coexist; reach for `quicksetup_*` to run one specific
+upstream config verbatim.
 
 **Plugins.** Add any Gravitee plugin to a running APIM instance, following Gravitee's
 documented approach (drop the zip into a `plugins-ext` dir + restart the node — the
@@ -281,10 +272,9 @@ persists via JDBC and serves through the gateway), and **keycloak** (run
 
 ### Running multiple stacks at once (generalized coexist)
 
-`apim_*` and `am_*` take an **`instance`** name so you can run several stacks of the
-same kind concurrently (`stack_*` / Gamma is the exception — it's locked to canonical
-ports, single instance). Each instance gets its own compose **project**, its own data
-volumes, and an **auto-allocated host-port band** — no manual port math:
+`apim_*`, `am_*`, and `gamma_*` take an **`instance`** name so you can run several stacks
+of the same kind concurrently. Each instance gets its own compose **project**, its own
+data volumes, and an **auto-allocated host-port band** — no manual port math:
 
 - `instance="default"` → canonical ports / project `gravitee-apim` (or `gravitee-am`).
 - a named instance → project `gravitee-apim-<name>` / `gravitee-am-<name>`, ports
@@ -404,10 +394,9 @@ file. Two ways to change it safely:
 
 ### Ports
 
-- **Gamma is canonical-ports-only** (single instance) — fixed `8082–8086`. `gamma_up`
-  pre-checks and returns `port_conflict` without starting if a port is taken. Because
-  Gamma bundles APIM, its ports collide with a separate `apim_*`/`am_*` stack.
-- **APIM & AM coexist** via named `instance`s — see [Running multiple stacks](#running-multiple-stacks-at-once-generalized-coexist).
+- **Gamma** uses canonical `8082–8086` by default; named instances shift to +20000/+40000.
+  Gamma bundles APIM, so two stacks on the *same* band collide.
+- **APIM, AM & Gamma coexist** via named `instance`s — see [Running multiple stacks](#running-multiple-stacks-at-once-generalized-coexist).
 
 Runtime state (up-process metadata + `up.log`, per stack) lives in this project's `.run/`
 (gitignored).
@@ -537,9 +526,9 @@ both — so if it works there but not in Desktop, it's one of these):
   on PATH"*. The `PATH` above covers `docker`/`git`/`lsof`.
 - **Keep the install out of a protected folder.** macOS TCC blocks GUI apps from reading
   `~/Documents`, `~/Desktop`, and `~/Downloads`, so a clone there crashes the server with
-  `PermissionError: Operation not permitted` on its own `.venv`. Put the clone **and** the
-  Gamma SDK somewhere like `~/gravitee/` — or grant Claude **Full Disk Access** (System
-  Settings → Privacy & Security). Claude Code isn't affected.
+  `PermissionError: Operation not permitted` on its own `.venv`. Put the clone somewhere
+  like `~/gravitee/` — or grant Claude **Full Disk Access** (System Settings → Privacy &
+  Security). Claude Code isn't affected.
 
 ## Typical flow
 
