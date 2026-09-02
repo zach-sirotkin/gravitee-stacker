@@ -237,10 +237,7 @@ CONFIG_SERVICES = ("apim-gateway", "apim-management-api")
 
 def config_dir() -> Path:
     """Where per-project config-override files live (editable rendered overrides)."""
-    d = Path(os.environ.get("STACKER_CONFIG_DIR")
-             or Path.home() / ".gravitee" / "stacker-config").expanduser()
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return runner.config_dir()
 
 
 def config_override_path(variant: str = "default", instance: str = "default") -> Path:

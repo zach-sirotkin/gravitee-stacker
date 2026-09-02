@@ -106,13 +106,67 @@ def compose_file() -> Path:
     return GAMMA_COMPOSE
 
 
+# Services that carry Gravitee config (gravitee_* env) — the config-override view targets them.
+CONFIG_SERVICES = ("gateway", "management_api")
+
+
+def config_override_path(instance: str = "default") -> Path:
+    """Editable docker-compose override holding this project's rendered gravitee_* values;
+    auto-layered onto every compose call for the project when present (see compose_args)."""
+    return runner.config_dir() / f"{project_for(instance)}.override.yml"
+
+
 def compose_args(instance: str = "default", features=None, with_license: bool = False) -> list[str]:
     args = ["-p", project_for(instance), "-f", str(compose_file())]
     for f in normalize_features(features):
         args += ["-f", str(feature_compose(f))]
     if with_license:
         args += ["-f", str(GAMMA_LICENSE_COMPOSE)]
+    override = config_override_path(instance)
+    if override.is_file():
+        args += ["-f", str(override)]
     return args
+
+
+def rendered_overrides(instance: str = "default", features=None) -> dict:
+    """The effective gravitee_* env per config service, fully interpolated (overrides layer)."""
+    p = subprocess.run(
+        ["docker", "compose", *compose_args(instance, features), "config", "--format", "json"],
+        cwd=str(gamma_state_dir()), env=_env(features=features),
+        capture_output=True, text=True, timeout=30,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"`docker compose config` failed: {p.stderr.strip()[:200]}")
+    cfg = json.loads(p.stdout)
+    out = {}
+    for svc in CONFIG_SERVICES:
+        s = cfg.get("services", {}).get(svc)
+        if not s:
+            continue
+        env = s.get("environment") or {}
+        if isinstance(env, list):
+            env = dict(e.split("=", 1) for e in env if "=" in e)
+        gk = {k: v for k, v in env.items() if str(k).lower().startswith("gravitee_")}
+        if gk:
+            out[svc] = gk
+    return out
+
+
+def recreate_config_services(instance: str = "default", timeout: int = 300) -> dict:
+    """Force-recreate the config services (gateway + management_api) so an edited config
+    override takes effect. Reads version/offset/features/license from the record."""
+    rec = _rec_for(instance)
+    if rec is None:
+        return {"ok": False, "error": f"instance '{instance}' is not tracked/running."}
+    features = normalize_features(rec.features)
+    p = subprocess.run(
+        ["docker", "compose", *compose_args(instance, features, with_license=bool(rec.license)),
+         "up", "-d", "--force-recreate", *CONFIG_SERVICES],
+        cwd=str(gamma_state_dir()), env=_env(rec.version or DEFAULT_VERSION, rec.offset or 0, rec.license, features),
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return {"ok": p.returncode == 0, "returncode": p.returncode,
+            "output": ((p.stdout or "") + (p.stderr or ""))[-1500:]}
 
 
 def resolve_version(version: Optional[str]) -> tuple[str, Optional[str]]:

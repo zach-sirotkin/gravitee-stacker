@@ -544,100 +544,99 @@ def _render_override_yaml(overrides: dict, project: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dump_full_gravitee_yaml(instance: str, variant: str) -> dict:
-    """Read each config service's in-image gravitee.yml (the hidden defaults) to a read-only
-    reference file. Best-effort — returns {service: path or error}."""
-    paths = {"apim-gateway": "/opt/graviteeio-gateway/config/gravitee.yml",
-             "apim-management-api": "/opt/graviteeio-management-api/config/gravitee.yml"}
+def _config_yaml_refs(project: str, services) -> dict:
+    """Dump each config service's in-image gravitee.yml (the hidden defaults) to a read-only
+    reference file. Best-effort — returns {service: path or reason}. Finds the file generically
+    at /opt/<product>/config/gravitee.yml, so it works across apim/am/gamma."""
     out = {}
-    project = apim.project_for(variant, instance)
-    for svc, cfg_path in paths.items():
+    for svc in services:
         cid = subprocess.run(["docker", "compose", "-p", project, "ps", "-q", svc],
                              capture_output=True, text=True, timeout=15).stdout.strip()
         if not cid:
             out[svc] = "service not running"
             continue
-        cat = subprocess.run(["docker", "exec", cid, "cat", cfg_path],
-                             capture_output=True, text=True, timeout=20)
+        cat = subprocess.run(
+            ["docker", "exec", cid, "sh", "-c", "cat $(ls /opt/*/config/gravitee.yml 2>/dev/null | head -1)"],
+            capture_output=True, text=True, timeout=20)
         if cat.returncode != 0 or not cat.stdout.strip():
-            out[svc] = f"could not read {cfg_path}"
+            out[svc] = "could not read gravitee.yml"
             continue
-        ref = apim.config_dir() / f"{project}.{svc}.gravitee.yml"
+        ref = runner.config_dir() / f"{project}.{svc}.gravitee.yml"
         ref.write_text(cat.stdout)
         out[svc] = str(ref)
     return out
 
 
-@mcp.tool()
-def apim_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
-    """View + tweak the RENDERED gravitee_* overrides on a running APIM instance.
-
-    Surfaces the config values stacker + your overlays actually set (fully interpolated) —
-    the top OVERRIDES layer, NOT the image's hidden gravitee.yml defaults (email.enabled,
-    ratelimit, cors, security, …). Three actions:
-
-      * "show" (default) — (re)write an editable override file at
-        ~/.gravitee/stacker-config/<project>.override.yml with the current rendered gravitee_*
-        values per config service (gateway + management-api), and return its path + a summary.
-        Edit values there, then apply. `full=True` ALSO dumps each service's in-image
-        gravitee.yml (all the hidden defaults) to a read-only reference file, so you can see
-        every setting that exists — even ones you haven't overridden.
-      * "apply" — recreate the gateway + management-api so your edits take effect (volumes
-        kept, ~20s; then apim_wait). The override file is auto-layered on every future up too.
-      * "reset" — delete the override file + recreate to revert to base+features config.
-
-    Note: Gravitee resolves config at startup, so "on the fly" means edit → recreate (fast),
-    not a live hot-reload.
-    """
+def _stack_config(instance, action, full, *, tool, project, services, override_path,
+                  running, rendered_fn, recreate_fn) -> dict:
+    """Shared view/tweak-config logic for apim_config / am_config / gamma_config."""
+    wait = tool.replace("_config", "_wait")
     if action not in ("show", "apply", "reset"):
         return {"status": "error", "message": "action must be 'show', 'apply', or 'reset'."}
-    variant = apim.current_variant(instance) or "default"
-    features = apim.current_features(instance)
-    ov_path = apim.config_override_path(variant, instance)
 
     if action == "reset":
-        if not ov_path.is_file():
+        if not override_path.is_file():
             return {"status": "noop", "instance": instance, "message": "no config override to reset."}
-        ov_path.unlink(missing_ok=True)
-        res = apim.recreate_gateway(instance)
+        override_path.unlink(missing_ok=True)
+        res = recreate_fn()
         return {"status": "reset" if res.get("ok") else "error", "instance": instance,
-                "removed": str(ov_path), "recreate_ok": res.get("ok"),
-                "next": f"Call apim_wait(instance='{instance}') — config reverted to base+features."}
+                "removed": str(override_path), "recreate_ok": res.get("ok"),
+                "next": f"Call {wait}(instance='{instance}') — config reverted to base+features."}
 
     if action == "apply":
-        if not ov_path.is_file():
+        if not override_path.is_file():
             return {"status": "error",
-                    "message": f"no override file yet — run apim_config(instance='{instance}') first, "
-                               f"edit {ov_path}, then apply."}
-        res = apim.recreate_gateway(instance)
+                    "message": f"no override file yet — run {tool}(instance='{instance}') first, edit "
+                               f"{override_path}, then apply."}
+        res = recreate_fn()
         return {"status": "applied" if res.get("ok") else "error", "instance": instance,
-                "applied_file": str(ov_path), "recreate_ok": res.get("ok"),
+                "applied_file": str(override_path), "recreate_ok": res.get("ok"),
                 "output_tail": (res.get("output") or "")[-800:],
-                "next": f"Call apim_wait(instance='{instance}') — then the edited values are live."}
+                "next": f"Call {wait}(instance='{instance}') — then the edited values are live."}
 
     # action == "show"
-    if not (apim.is_up_running(instance) or apim.stack_running(variant, instance)):
+    if not running:
         return {"status": "not_running", "instance": instance,
-                "message": f"APIM instance '{instance}' isn't running — start it first."}
+                "message": f"instance '{instance}' isn't running — start it first."}
     try:
-        overrides = apim.rendered_overrides(variant, instance, features)
+        overrides = rendered_fn()
     except (RuntimeError, ValueError) as e:
         return {"status": "error", "message": f"could not read config: {e}"}
-    ov_path.write_text(_render_override_yaml(overrides, apim.project_for(variant, instance)))
-    out = {"status": "ok", "instance": instance, "override_file": str(ov_path),
+    override_path.write_text(_render_override_yaml(overrides, project))
+    out = {"status": "ok", "instance": instance, "override_file": str(override_path),
            "overrides": {svc: sorted(kv.keys()) for svc, kv in overrides.items()},
            "count": sum(len(kv) for kv in overrides.values()),
-           "note": ("These are the OVERRIDES only — the image's gravitee.yml holds many more "
-                    "HIDDEN defaults (e.g. email.enabled=false) not shown here. Pass full=True to "
-                    "dump them for reference. Edit values in the override file, then "
-                    "apim_config(instance, action='apply')."),
-           "next": f"Edit {ov_path}, then apim_config(instance='{instance}', action='apply')."}
+           "note": ("These are the OVERRIDES only — the image's gravitee.yml holds many more HIDDEN "
+                    "defaults (e.g. email.enabled=false) not shown here. Pass full=True to dump them for "
+                    f"reference. Edit values in the override file, then {tool}(instance, action='apply')."),
+           "next": f"Edit {override_path}, then {tool}(instance='{instance}', action='apply')."}
     if full:
-        out["hidden_defaults_note"] = ("Read-only reference below: the in-image gravitee.yml (ALL "
-                                       "defaults). To change one, add a gravitee_* line to the override "
-                                       "file (e.g. gravitee_email_enabled: \"true\").")
-        out["full_config_refs"] = _dump_full_gravitee_yaml(instance, variant)
+        out["hidden_defaults_note"] = ("Read-only reference: the in-image gravitee.yml (ALL defaults). "
+                                       "To change one, add a gravitee_* line to the override file.")
+        out["full_config_refs"] = _config_yaml_refs(project, services)
     return out
+
+
+@mcp.tool()
+def apim_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
+    """View + tweak the RENDERED gravitee_* config overrides on a running APIM instance.
+
+    Surfaces the config values stacker + your overlays actually set (fully interpolated) — the
+    top OVERRIDES layer, NOT the image's hidden gravitee.yml defaults (email.enabled, ratelimit,
+    cors, …). action="show" (default) (re)writes an editable
+    ~/.gravitee/stacker-config/<project>.override.yml (full=True also dumps the in-image
+    gravitee.yml so hidden defaults are visible); "apply" recreates gateway+management-api so
+    edits take effect (volumes kept, ~20s → apim_wait); "reset" reverts. The override file is
+    auto-layered on every future up. Config is startup-time, so "on the fly" = edit → recreate.
+    """
+    variant = apim.current_variant(instance) or "default"
+    return _stack_config(
+        instance, action, full, tool="apim_config",
+        project=apim.project_for(variant, instance), services=apim.CONFIG_SERVICES,
+        override_path=apim.config_override_path(variant, instance),
+        running=(apim.is_up_running(instance) or apim.stack_running(variant, instance)),
+        rendered_fn=lambda: apim.rendered_overrides(variant, instance, apim.current_features(instance)),
+        recreate_fn=lambda: apim.recreate_gateway(instance))
 
 
 @mcp.tool()
@@ -1190,6 +1189,24 @@ def am_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
             "logs": p.stdout or p.stderr}
 
 
+@mcp.tool()
+def am_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
+    """View + tweak the RENDERED gravitee_* config overrides on a running AM instance.
+
+    Same as apim_config, for the AM stack (config services: gateway + management). action="show"
+    (default) (re)writes an editable ~/.gravitee/stacker-config/<project>.override.yml (full=True
+    also dumps the in-image gravitee.yml so hidden defaults are visible); "apply" recreates them
+    so edits go live (volumes kept → am_wait); "reset" reverts. Edit → recreate, not hot-reload.
+    """
+    return _stack_config(
+        instance, action, full, tool="am_config",
+        project=am.project_for(instance), services=am.CONFIG_SERVICES,
+        override_path=am.config_override_path(instance),
+        running=(am.is_up_running(instance) or am.stack_running(instance)),
+        rendered_fn=lambda: am.rendered_overrides(instance, am.current_features(instance)),
+        recreate_fn=lambda: am.recreate_config_services(instance))
+
+
 # ── Public Gamma stack (gamma_*) — self-contained, public images, no ACR ───────
 def _gamma_summarize(instance: str = "default") -> dict:
     up = gamma.up_process_status(instance)
@@ -1407,6 +1424,24 @@ def gamma_logs(service: str, lines: int = 100, instance: str = "default") -> dic
     p = gamma.compose_logs(service, lines, instance, feats)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service, "instance": instance,
             "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
+
+
+@mcp.tool()
+def gamma_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
+    """View + tweak the RENDERED gravitee_* config overrides on a running Gamma instance.
+
+    Same as apim_config, for the Gamma stack (config services: gateway + management_api).
+    action="show" (default) (re)writes an editable ~/.gravitee/stacker-config/<project>.override.yml
+    (full=True also dumps the in-image gravitee.yml so hidden defaults are visible); "apply"
+    recreates them so edits go live (volumes kept → gamma_wait); "reset" reverts.
+    """
+    return _stack_config(
+        instance, action, full, tool="gamma_config",
+        project=gamma.project_for(instance), services=gamma.CONFIG_SERVICES,
+        override_path=gamma.config_override_path(instance),
+        running=(gamma.is_up_running(instance) or gamma.stack_running(instance)),
+        rendered_fn=lambda: gamma.rendered_overrides(instance, gamma.current_features(instance)),
+        recreate_fn=lambda: gamma.recreate_config_services(instance))
 
 
 @mcp.tool()

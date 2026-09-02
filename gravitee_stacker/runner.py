@@ -31,6 +31,15 @@ def state_dir() -> Path:
     return d
 
 
+def config_dir() -> Path:
+    """Where per-project config-override files live (editable rendered gravitee_* values).
+    Shared across stacks; override with STACKER_CONFIG_DIR (default ~/.gravitee/stacker-config)."""
+    d = Path(os.environ.get("STACKER_CONFIG_DIR")
+             or Path.home() / ".gravitee" / "stacker-config").expanduser()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _child_env() -> dict[str, str]:
     """Environment for child processes.
 
