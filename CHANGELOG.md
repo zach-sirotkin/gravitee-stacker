@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.10.0] — 2026-09-02
 
 ### Added
+- **`apim_config` — view + tweak rendered config overrides (APIM).** Surfaces the
+  `gravitee_*` overrides stacker + overlays actually set (fully interpolated) — the top
+  overrides layer, not the image's hidden gravitee.yml defaults — to an editable
+  `~/.gravitee/stacker-config/<project>.override.yml`. `action="show"` (re)writes it (with
+  `full=True` also dumping the in-image gravitee.yml so hidden defaults are visible);
+  `action="apply"` recreates the gateway + management-api so edits take effect (volumes
+  kept); `action="reset"` reverts. The override file is auto-layered onto every up/recreate
+  for the project (a one-line `compose_args` hook), so edits persist until reset. Config is
+  startup-time, so "on the fly" means edit → recreate (~20s), not hot-reload. (AM/Gamma to follow.)
 - **`mailpit` feature on all three stacks** — local SMTP capture (Mailpit) + `email.enabled`
   on the management-api, so account flows that depend on email (registration, password
   reset, subscription/MFA notifications) are exercisable locally instead of silently

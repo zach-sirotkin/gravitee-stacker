@@ -230,6 +230,25 @@ def compose_file(variant: str = "default") -> Path:
     return APIM_COMPOSE
 
 
+# Services that carry Gravitee config (gravitee_* env). The config-override view + edit
+# targets these; recreating them applies edited values.
+CONFIG_SERVICES = ("apim-gateway", "apim-management-api")
+
+
+def config_dir() -> Path:
+    """Where per-project config-override files live (editable rendered overrides)."""
+    d = Path(os.environ.get("STACKER_CONFIG_DIR")
+             or Path.home() / ".gravitee" / "stacker-config").expanduser()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def config_override_path(variant: str = "default", instance: str = "default") -> Path:
+    """Editable docker-compose override holding this project's rendered gravitee_* values.
+    When present it is auto-layered onto every compose call for the project (see compose_args)."""
+    return config_dir() / f"{project_for(variant, instance)}.override.yml"
+
+
 def compose_args(variant: str = "default", instance: str = "default",
                  license_path: Optional[str] = None, features=None) -> list[str]:
     args = ["-p", project_for(variant, instance), "-f", str(compose_file(variant))]
@@ -237,7 +256,29 @@ def compose_args(variant: str = "default", instance: str = "default",
         args += ["-f", str(APIM_LICENSE_COMPOSE)]
     for f in normalize_features(features):
         args += ["-f", str(feature_compose(f))]
+    # A per-project config override (edited rendered values) wins over everything above.
+    override = config_override_path(variant, instance)
+    if override.is_file():
+        args += ["-f", str(override)]
     return args
+
+
+def rendered_overrides(variant: str = "default", instance: str = "default", features=None) -> dict:
+    """The effective gravitee_* env per config service, fully interpolated (the rendered
+    OVERRIDES layer — not the image's hidden gravitee.yml defaults)."""
+    cfg = _config(variant=variant, instance=instance, features=features)
+    out = {}
+    for svc in CONFIG_SERVICES:
+        s = cfg.get("services", {}).get(svc)
+        if not s:
+            continue
+        env = s.get("environment") or {}
+        if isinstance(env, list):
+            env = dict(e.split("=", 1) for e in env if "=" in e)
+        gk = {k: v for k, v in env.items() if str(k).lower().startswith("gravitee_")}
+        if gk:
+            out[svc] = gk
+    return out
 
 
 def port_offset() -> int:
