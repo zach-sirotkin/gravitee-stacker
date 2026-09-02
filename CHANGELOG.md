@@ -7,12 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.10.1] — 2026-09-02
 
 ### Added
-- **`*_config(compose=True)` — dump the full rendered compose.** On `show`, also writes
-  `~/.gravitee/stacker-config/<project>.rendered-compose.yml`: the complete effective compose
-  (`docker compose config` YAML) — every service / image / port / volume / network + all env,
+- **Rendered compose is now an automatic lifecycle artifact.** Every `*_up` writes
+  `~/.gravitee/stacker-config/<project>.rendered-compose.yml` — the complete effective compose
+  (`docker compose config` YAML): every service / image / port / volume / network + all env,
   fully interpolated from the base compose + feature overlays + license + config override.
-  Complements the override view (the thin config layer) with the whole stack picture, and
-  `full=True` (the in-image gravitee.yml defaults). New `rendered_compose()` per stack module.
+  - **No staleness:** it's refreshed on config `apply`/`reset` and **deleted on `*_down`**, so
+    the file exists only while its stack is tracked and always matches the live config.
+  - Header banner states the lifecycle. Opt out with `STACKER_COMPOSE_DUMP=0`.
+  - `*_config(compose=True)` still works — it now just **force-refreshes** the same file on
+    demand (e.g. after manual `docker` changes). New `rendered_compose()` per stack module.
 
 ## [0.10.0] — 2026-09-02
 
