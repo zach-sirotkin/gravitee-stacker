@@ -23,6 +23,8 @@ launch any release on command, run several at once, no hand-rolled compose files
   opensearch, prometheus, …) on demand, with known-gotcha auto-fixes.
 - **Gamma platform** (`gamma_*`) — the full Gamma platform (Agent / Authorization /
   Event / Edge Management on top of APIM) from a self-contained compose.
+- **See + tweak config** (`*_config`) — surface the rendered `gravitee_*` overrides on a
+  running stack as an editable file and apply changes on the fly (apim / am / gamma).
 
 APIM, AM, and Gamma support **named instances** so you can run several stacks of the same
 kind at once — ports shift with the instance so they coexist. A guided-launch helper
@@ -87,6 +89,7 @@ only Agent Management needs one.
 | `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `instance` (run several at once), `features` (e.g. `["mailpit"]` — local SMTP capture), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). |
 | `gamma_wait`   | Block until healthy, then return at once (fails fast). Use after `gamma_up` instead of a sleep loop. Takes `instance`. |
 | `gamma_status` | Overall verdict + per-service health, version, project, URLs. Takes `instance`. |
+| `gamma_config` | View + tweak the rendered `gravitee_*` config values (`show`/`apply`/`reset`; `full=True` dumps the hidden gravitee.yml defaults). Takes `instance`. See [Config](#config-see--tweak-the-rendered-values). |
 | `gamma_list`   | List tracked Gamma instances with status/version/ports/URLs (for coexist). |
 | `gamma_license` | Show the license entitlements (tier/packs/features/expiry) loaded on the running stack — read from the mgmt-api node endpoint. A greyed-out Gamma module means its pack isn't in `packs`. Takes `instance`. |
 | `gamma_down`   | `docker compose down` (volumes preserved; `volumes=true` wipes data). Takes `instance`. |
@@ -108,6 +111,7 @@ mongodb + elasticsearch + gateway + management-api + console + portal) on ports
 | -------------------- | ------------------------------------------------------------------------------------------------- |
 | `apim_up`            | Resolves + pins a release, checks ports, starts APIM in the background. On a port conflict it does not start — returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.12.7"`), `variant` (`default`/`kafka`), `features` (see below), `instance` (run several at once), `down_conflicting=true` (down the other stack first), `recreate=true`, `license="/path/…"`. |
 | `apim_status`        | Overall verdict + per-service health, pinned version, variant, features, project, and URLs. Takes `instance`. |
+| `apim_config`        | View + tweak the rendered `gravitee_*` config overrides on a running instance — `show` writes an editable `~/.gravitee/stacker-config/<project>.override.yml`, `apply` recreates to make edits live, `reset` reverts; `full=True` also dumps the hidden gravitee.yml defaults. See [Config](#config-see--tweak-the-rendered-values). |
 | `apim_license`       | Show the enterprise license entitlements (tier/packs/features/expiry) loaded on a running instance — read from the mgmt-api node endpoint. A disabled EE feature usually means its pack isn't in `packs` (entitlement gap, not a mount problem). |
 | `apim_wait`          | **Block until the stack is actually healthy, then return at once** — the readiness-aware alternative to sleeping in a loop after `apim_up`. Returns the moment `overall` flips to healthy; fails fast on a crashed launcher (`failed`) or nothing running (`down`). `timeout_seconds` is a safety ceiling (raise it for a first-ever pull), not a fixed wait. |
 | `apim_list`          | Tracked APIM instances + status/version/features/URLs — **plus** `other_stacks_on_apim_ports` (quick-setups or untracked stacks actually holding 8082–8085; run-records alone are unreliable, so prefer `stack_preflight` for real occupancy). |
@@ -205,6 +209,7 @@ host** (one port); everything else is internal.
 | ------------------ | ----------------------------------------------------------------------------------------------- |
 | `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.11.10"`), `instance` (run several at once), `port` (default `AM_NGINX_PORT` or 8086), `features` (e.g. `["mailpit"]` — local SMTP for AM's registration/forgot-password/MFA-by-email flows), `recreate=true`, `down_conflicting=true`. |
 | `am_status`        | Overall verdict + per-service health, version, port, project, URLs. Takes `instance`. The management API is slow — status stays `partial` until its healthcheck passes, so wait for `healthy`. |
+| `am_config`        | View + tweak the rendered `gravitee_*` config values (`show`/`apply`/`reset`; `full=True` dumps the hidden gravitee.yml defaults). Takes `instance`. See [Config](#config-see--tweak-the-rendered-values). |
 | `am_wait`          | Block until the AM stack is healthy, then return at once (fails fast on error). Use it instead of a sleep loop after `am_up` — the slow mgmt-API healthcheck is exactly what it handles. |
 | `am_list`          | List all tracked AM instances with their status/version/port/URLs.                                |
 | `am_down`          | `docker compose down` (volumes preserved). Takes `instance`.                                        |
@@ -216,6 +221,30 @@ overlaps nothing else (Gamma/APIM use 80–8085), it usually just runs; if the p
 taken it reports the conflict. UIs are path-routed through nginx: console
 `http://localhost:{port}/am/ui/` (admin/adminadmin), management API `…/am/management/`,
 gateway `…/am/`.
+
+### Config: see + tweak the rendered values
+
+Hard to know what's *actually* configured on a running stack? `apim_config` / `am_config` /
+`gamma_config` surface the **rendered `gravitee_*` overrides** — the values stacker + your
+overlays actually set, fully interpolated — as an editable file you can change on the fly:
+
+```
+apim_config(instance="default")                   # writes ~/.gravitee/stacker-config/gravitee-apim.override.yml
+# …edit any value in that file…
+apim_config(instance="default", action="apply")   # recreate gateway + mgmt-api → edits live (~20s), then apim_wait
+apim_config(instance="default", action="reset")   # delete override + recreate → back to base+features
+```
+
+- **`show`** (default) writes/refreshes the editable override; **`apply`** recreates the config
+  services so edits take effect (volumes kept); **`reset`** reverts.
+- The override file is **auto-layered** onto every future up/recreate for that project, so
+  edits persist until you `reset`.
+- These are the top **overrides** layer only. The image's `gravitee.yml` ships hundreds of
+  **hidden defaults** you never set (e.g. `email.enabled: false` — the reason the [`mailpit`
+  feature](#composable-features) has to flip it). Pass **`full=True`** to also dump each
+  service's in-image `gravitee.yml` as a read-only reference so those defaults are visible.
+- Gravitee resolves config at **startup**, so "on the fly" means edit → recreate (fast), not a
+  live hot-reload.
 
 ### Quick-setup configs (`quicksetup_*`)
 
@@ -378,7 +407,9 @@ via `docker compose config --services`, so it never drifts from the actual compo
 | `APIM_COMPOSE_FILE` | shipped `apim-compose.yml`                            | Point at your own APIM compose to use instead of the bundled one (see below). |
 | `AM_NGINX_PORT`  | `8086`                                                     | Default host port for the AM stack's nginx (overridden by `am_up`'s `port` arg). |
 | `AM_COMPOSE_FILE` | shipped `am-compose.yml`                                  | Point at your own AM compose instead of the bundled one. |
-| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` live (per stack). |
+| `APIM_FEATURES_DIR` | `~/.gravitee/stacker-features`                          | Where custom feature overlays (`<stack>-feature-<name>.yml`) live — your overlays win over bundled ones. |
+| `STACKER_CONFIG_DIR` | `~/.gravitee/stacker-config`                           | Where `*_config` writes the editable per-project override files. |
+| `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` live (per stack). The daily-use install points this at `~/.gravitee/stacker-run`. |
 
 **Customizing the APIM stack.** The shipped `apim-compose.yml` is a plain compose
 file. Two ways to change it safely:
@@ -559,4 +590,11 @@ Kafka variant + features + multiple instances:
 ```
 apim_up(variant="kafka", features=["prometheus","redis-rate-limit"])  → Kafka gateway + Prometheus + Redis (EE license), :9092
 am_up(instance="a")   /   am_up(instance="b")  → two AM stacks at once (8086 / 8087)
+```
+
+See + tweak a running stack's config:
+```
+apim_config                                → editable ~/.gravitee/stacker-config/gravitee-apim.override.yml
+apim_config(action="apply")   → apim_wait  → your edits are live (recreate, volumes kept)
+apim_config(full=True)                     → also dump the hidden gravitee.yml defaults for reference
 ```
