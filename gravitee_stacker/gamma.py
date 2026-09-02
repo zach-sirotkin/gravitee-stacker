@@ -152,6 +152,22 @@ def rendered_overrides(instance: str = "default", features=None) -> dict:
     return out
 
 
+def rendered_compose(instance: str = "default") -> Optional[str]:
+    """The FULL rendered compose (`docker compose config` YAML) for a tracked instance — every
+    service, image, port, volume, network + all env, fully interpolated. Reads the record."""
+    rec = _rec_for(instance)
+    version = rec.version if rec else DEFAULT_VERSION
+    offset = rec.offset if rec else 0
+    features = normalize_features(rec.features) if rec else None
+    license_path = rec.license if rec else None
+    p = subprocess.run(
+        ["docker", "compose", *compose_args(instance, features, with_license=bool(license_path)), "config"],
+        cwd=str(gamma_state_dir()), env=_env(version, offset, license_path, features),
+        capture_output=True, text=True, timeout=30,
+    )
+    return p.stdout if p.returncode == 0 else None
+
+
 def recreate_config_services(instance: str = "default", timeout: int = 300) -> dict:
     """Force-recreate the config services (gateway + management_api) so an edited config
     override takes effect. Reads version/offset/features/license from the record."""

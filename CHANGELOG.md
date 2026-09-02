@@ -4,6 +4,16 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] — 2026-09-02
+
+### Added
+- **`*_config(compose=True)` — dump the full rendered compose.** On `show`, also writes
+  `~/.gravitee/stacker-config/<project>.rendered-compose.yml`: the complete effective compose
+  (`docker compose config` YAML) — every service / image / port / volume / network + all env,
+  fully interpolated from the base compose + feature overlays + license + config override.
+  Complements the override view (the thin config layer) with the whole stack picture, and
+  `full=True` (the in-image gravitee.yml defaults). New `rendered_compose()` per stack module.
+
 ## [0.10.0] — 2026-09-02
 
 ### Added

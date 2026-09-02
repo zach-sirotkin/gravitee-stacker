@@ -568,7 +568,7 @@ def _config_yaml_refs(project: str, services) -> dict:
 
 
 def _stack_config(instance, action, full, *, tool, project, services, override_path,
-                  running, rendered_fn, recreate_fn) -> dict:
+                  running, rendered_fn, recreate_fn, compose=False, compose_fn=None) -> dict:
     """Shared view/tweak-config logic for apim_config / am_config / gamma_config."""
     wait = tool.replace("_config", "_wait")
     if action not in ("show", "apply", "reset"):
@@ -614,20 +614,36 @@ def _stack_config(instance, action, full, *, tool, project, services, override_p
         out["hidden_defaults_note"] = ("Read-only reference: the in-image gravitee.yml (ALL defaults). "
                                        "To change one, add a gravitee_* line to the override file.")
         out["full_config_refs"] = _config_yaml_refs(project, services)
+    if compose and compose_fn:
+        rendered = compose_fn()
+        if rendered:
+            ref = runner.config_dir() / f"{project}.rendered-compose.yml"
+            ref.write_text(rendered)
+            out["rendered_compose_file"] = str(ref)
+            out["rendered_compose_note"] = ("The FULL rendered compose (every service, image, port, "
+                                            "volume, network + all env, fully interpolated) — read-only "
+                                            "reference for what stacker actually runs, incl. the base "
+                                            "compose your override doesn't repeat.")
+        else:
+            out["rendered_compose_file"] = "could not render compose (is the instance tracked?)"
     return out
 
 
 @mcp.tool()
-def apim_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
+def apim_config(instance: str = "default", action: str = "show", full: bool = False,
+                compose: bool = False) -> dict:
     """View + tweak the RENDERED gravitee_* config overrides on a running APIM instance.
 
     Surfaces the config values stacker + your overlays actually set (fully interpolated) — the
     top OVERRIDES layer, NOT the image's hidden gravitee.yml defaults (email.enabled, ratelimit,
     cors, …). action="show" (default) (re)writes an editable
-    ~/.gravitee/stacker-config/<project>.override.yml (full=True also dumps the in-image
-    gravitee.yml so hidden defaults are visible); "apply" recreates gateway+management-api so
-    edits take effect (volumes kept, ~20s → apim_wait); "reset" reverts. The override file is
+    ~/.gravitee/stacker-config/<project>.override.yml; "apply" recreates gateway+management-api
+    so edits take effect (volumes kept, ~20s → apim_wait); "reset" reverts. The override file is
     auto-layered on every future up. Config is startup-time, so "on the fly" = edit → recreate.
+
+    Reference dumps on `show`: full=True writes each service's in-image gravitee.yml (all HIDDEN
+    defaults); compose=True writes the FULL rendered compose (every service/image/port/volume/
+    network + all env, fully interpolated — the whole stack the override doesn't repeat).
     """
     variant = apim.current_variant(instance) or "default"
     return _stack_config(
@@ -636,7 +652,8 @@ def apim_config(instance: str = "default", action: str = "show", full: bool = Fa
         override_path=apim.config_override_path(variant, instance),
         running=(apim.is_up_running(instance) or apim.stack_running(variant, instance)),
         rendered_fn=lambda: apim.rendered_overrides(variant, instance, apim.current_features(instance)),
-        recreate_fn=lambda: apim.recreate_gateway(instance))
+        recreate_fn=lambda: apim.recreate_gateway(instance),
+        compose=compose, compose_fn=lambda: apim.rendered_compose(instance))
 
 
 @mcp.tool()
@@ -1190,13 +1207,14 @@ def am_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
 
 
 @mcp.tool()
-def am_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
+def am_config(instance: str = "default", action: str = "show", full: bool = False,
+              compose: bool = False) -> dict:
     """View + tweak the RENDERED gravitee_* config overrides on a running AM instance.
 
     Same as apim_config, for the AM stack (config services: gateway + management). action="show"
-    (default) (re)writes an editable ~/.gravitee/stacker-config/<project>.override.yml (full=True
-    also dumps the in-image gravitee.yml so hidden defaults are visible); "apply" recreates them
-    so edits go live (volumes kept → am_wait); "reset" reverts. Edit → recreate, not hot-reload.
+    (default) (re)writes an editable ~/.gravitee/stacker-config/<project>.override.yml; "apply"
+    recreates them so edits go live (volumes kept → am_wait); "reset" reverts. On show: full=True
+    dumps the in-image gravitee.yml (hidden defaults); compose=True dumps the FULL rendered compose.
     """
     return _stack_config(
         instance, action, full, tool="am_config",
@@ -1204,7 +1222,8 @@ def am_config(instance: str = "default", action: str = "show", full: bool = Fals
         override_path=am.config_override_path(instance),
         running=(am.is_up_running(instance) or am.stack_running(instance)),
         rendered_fn=lambda: am.rendered_overrides(instance, am.current_features(instance)),
-        recreate_fn=lambda: am.recreate_config_services(instance))
+        recreate_fn=lambda: am.recreate_config_services(instance),
+        compose=compose, compose_fn=lambda: am.rendered_compose(instance))
 
 
 # ── Public Gamma stack (gamma_*) — self-contained, public images, no ACR ───────
@@ -1427,13 +1446,14 @@ def gamma_logs(service: str, lines: int = 100, instance: str = "default") -> dic
 
 
 @mcp.tool()
-def gamma_config(instance: str = "default", action: str = "show", full: bool = False) -> dict:
+def gamma_config(instance: str = "default", action: str = "show", full: bool = False,
+                 compose: bool = False) -> dict:
     """View + tweak the RENDERED gravitee_* config overrides on a running Gamma instance.
 
     Same as apim_config, for the Gamma stack (config services: gateway + management_api).
-    action="show" (default) (re)writes an editable ~/.gravitee/stacker-config/<project>.override.yml
-    (full=True also dumps the in-image gravitee.yml so hidden defaults are visible); "apply"
-    recreates them so edits go live (volumes kept → gamma_wait); "reset" reverts.
+    action="show" (default) (re)writes an editable ~/.gravitee/stacker-config/<project>.override.yml;
+    "apply" recreates them so edits go live (volumes kept → gamma_wait); "reset" reverts. On show:
+    full=True dumps the in-image gravitee.yml (hidden defaults); compose=True dumps the FULL compose.
     """
     return _stack_config(
         instance, action, full, tool="gamma_config",
@@ -1441,7 +1461,8 @@ def gamma_config(instance: str = "default", action: str = "show", full: bool = F
         override_path=gamma.config_override_path(instance),
         running=(gamma.is_up_running(instance) or gamma.stack_running(instance)),
         rendered_fn=lambda: gamma.rendered_overrides(instance, gamma.current_features(instance)),
-        recreate_fn=lambda: gamma.recreate_config_services(instance))
+        recreate_fn=lambda: gamma.recreate_config_services(instance),
+        compose=compose, compose_fn=lambda: gamma.rendered_compose(instance))
 
 
 @mcp.tool()

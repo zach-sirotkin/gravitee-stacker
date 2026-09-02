@@ -278,6 +278,28 @@ def rendered_overrides(variant: str = "default", instance: str = "default", feat
     return out
 
 
+def rendered_compose(instance: str = "default") -> Optional[str]:
+    """The FULL rendered compose (`docker compose config` YAML) for a tracked instance —
+    every service, image, port, volume, network + all env, fully interpolated (base + feature
+    overlays + license + config override). Reads the record so ports/features/license match."""
+    rec = _rec_for(instance)
+    version = rec.version if rec else "latest"
+    variant = rec.variant if rec else "default"
+    features = normalize_features(rec.features) if rec else None
+    license_path = rec.license if rec else None
+    try:
+        port_env = plan_ports(rec.offset if rec else 0, variant, features)["port_env"]
+    except (RuntimeError, ValueError):
+        port_env = {}
+    p = subprocess.run(
+        ["docker", "compose", *compose_args(variant, instance, license_path, features), "config"],
+        cwd=str(apim_state_dir()),
+        env=_env(version, port_env, variant, license_path, features, instance),
+        capture_output=True, text=True, timeout=30,
+    )
+    return p.stdout if p.returncode == 0 else None
+
+
 def port_offset() -> int:
     try:
         return int(os.environ.get("APIM_PORT_OFFSET", str(DEFAULT_PORT_OFFSET))) or DEFAULT_PORT_OFFSET

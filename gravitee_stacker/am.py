@@ -150,6 +150,21 @@ def rendered_overrides(instance: str = "default", features=None) -> dict:
     return out
 
 
+def rendered_compose(instance: str = "default") -> Optional[str]:
+    """The FULL rendered compose (`docker compose config` YAML) for a tracked instance — every
+    service, image, port, volume, network + all env, fully interpolated. Reads the record."""
+    rec = _rec_for(instance)
+    version = rec.version if rec else "latest"
+    port = rec.port if rec else default_port()
+    features = normalize_features(rec.features) if rec else None
+    p = subprocess.run(
+        ["docker", "compose", *compose_args(instance, features), "config"],
+        cwd=str(am_state_dir()), env=_env(version, port, features),
+        capture_output=True, text=True, timeout=30,
+    )
+    return p.stdout if p.returncode == 0 else None
+
+
 def recreate_config_services(instance: str = "default", timeout: int = 300) -> dict:
     """Force-recreate the config services (gateway + management) of a tracked instance so an
     edited config override takes effect. Reads version/features/port from the record."""

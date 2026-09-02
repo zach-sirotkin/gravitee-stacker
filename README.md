@@ -243,6 +243,10 @@ apim_config(instance="default", action="reset")   # delete override + recreate �
   **hidden defaults** you never set (e.g. `email.enabled: false` — the reason the [`mailpit`
   feature](#composable-features) has to flip it). Pass **`full=True`** to also dump each
   service's in-image `gravitee.yml` as a read-only reference so those defaults are visible.
+- Pass **`compose=True`** to also dump the **full rendered compose**
+  (`<project>.rendered-compose.yml`) — every service / image / port / volume / network + all
+  env, fully interpolated (like `docker compose config`). That's the whole stack the override
+  layer doesn't repeat, with images/paths/ports resolved to what's actually running.
 - Gravitee resolves config at **startup**, so "on the fly" means edit → recreate (fast), not a
   live hot-reload.
 
