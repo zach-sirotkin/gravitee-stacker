@@ -1,0 +1,22 @@
+# Local SMTP capture (Mailpit). Account flows that depend on email — registration,
+# password reset, subscription notifications — become exercisable on a local stack: mail
+# is captured in the Mailpit web UI instead of going anywhere. SMTP :1025 stays internal
+# to the compose network; only the web UI is published (shifts with the instance offset).
+services:
+  apim-mailpit:
+    image: axllent/mailpit:v1.31.0
+    restart: unless-stopped
+    networks: [storage]
+    ports:
+      - "${APIM_MAILPIT_PORT:-8025}:8025"
+    environment:
+      - MP_SMTP_AUTH_ACCEPT_ANY=1
+      - MP_SMTP_AUTH_ALLOW_INSECURE=1
+
+  apim-management-api:
+    environment:
+      - gravitee_email_enabled=true
+      - gravitee_email_host=apim-mailpit
+      - gravitee_email_port=1025
+      - gravitee_email_from=noreply@gravitee.local
+      - gravitee_email_subject=[Gravitee.io] %s

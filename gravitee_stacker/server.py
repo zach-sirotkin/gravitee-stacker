@@ -841,8 +841,9 @@ def apim_plugin_remove(name: str, instance: str = "default") -> dict:
 # ── standalone AM (Access Management) stack tools ─────────────────────────────
 def _am_summarize(instance: str = "default") -> dict:
     up = am.up_process_status(instance)
-    rows = am.compose_ps(instance)
-    expected = am.service_names(instance)
+    feats = up.get("features") or am.current_features(instance)
+    rows = am.compose_ps(instance, feats)
+    expected = am.service_names(instance, feats)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -875,12 +876,15 @@ def _am_summarize(instance: str = "default") -> dict:
         "version": up.get("version") or am.current_version(instance),
         "port": port,
         "project": am.project_for(instance),
+        "features": list(feats or []),
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
                       "label": labels[s]} for s in expected],
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
-        "urls": am.urls_for(port),
+        "urls": {**am.urls_for(port),
+                 **({"mailpit": f"http://localhost:{am.feature_host_ports(feats, port)[0]}"}
+                    if "mailpit" in (feats or []) and am.feature_host_ports(feats, port) else {})},
         "up_log_tail": runner.tail_file(am.up_log_path(instance), 40),
         "checked_at": _now_iso(),
     }
@@ -899,7 +903,7 @@ def am_wait(instance: str = "default", timeout_seconds: int = 420, poll_seconds:
 
 
 @mcp.tool()
-def am_up(version: str = "latest", instance: str = "default", port: int = 0,
+def am_up(version: str = "latest", instance: str = "default", port: int = 0, features: list = None,
           pull: bool = True, recreate: bool = False, down_conflicting: bool = False) -> dict:
     """Stand up a standalone Gravitee Access Management (AM) stack (background).
 
@@ -921,10 +925,21 @@ def am_up(version: str = "latest", instance: str = "default", port: int = 0,
         version: Image tag to pin (GIO_AM_VERSION). "latest" resolves the newest stable.
         instance: unique name to run several stacks at once (default "default").
         port: Host port for nginx. 0 = auto (default instance → 8086; named → next free).
+        features: composable overlays, e.g. ["mailpit"] (local SMTP capture so AM's
+            registration/forgotten-password/MFA-by-email flows are exercisable). A feature's
+            host port shifts with the nginx-port delta; drop an `am-feature-<name>.yml` in
+            ~/.gravitee/stacker-features for a custom one.
         pull: Pull images before up (default).
         recreate: `up -d --force-recreate`.
         down_conflicting: Down the project holding the port first (no -v; data kept).
     """
+    features = am.normalize_features(features)
+    bad = am.unknown_features(features)
+    if bad:
+        return {"status": "blocked",
+                "message": f"unknown feature(s) {bad}; built-in: {list(am.FEATURES)}. For a CUSTOM "
+                           f"feature, drop am-feature-<name>.yml into {am.features_dir()}.",
+                "features_dir": str(am.features_dir())}
     if am.is_up_running(instance) or am.stack_running(instance):
         return {"status": "already_running", "instance": instance,
                 "project": am.project_for(instance),
@@ -967,16 +982,36 @@ def am_up(version: str = "latest", instance: str = "default", port: int = 0,
         res = am.down_project(conflict["project"])
         downed.append({"project": conflict["project"], "returncode": res["returncode"]})
 
+    # Feature host ports (e.g. mailpit) must be free too — check them like the nginx port.
+    feat_conflicts = []
+    for fp in am.feature_host_ports(features, nginx_port):
+        h = am.project_holding_port(fp)
+        if h and h["project"] != am.project_for(instance):
+            feat_conflicts.append(h)
+    if feat_conflicts:
+        if not down_conflicting:
+            return {"status": "port_conflict", "version": resolved, "instance": instance,
+                    "message": (f"feature port(s) {sorted({c['port'] for c in feat_conflicts})} held by "
+                                f"{sorted({c['project'] for c in feat_conflicts})}. AM was NOT started — pass "
+                                "down_conflicting=true to free them, or free the port(s)."),
+                    "conflicts": feat_conflicts}
+        for proj in sorted({c["project"] for c in feat_conflicts}):
+            res = am.down_project(proj)
+            downed.append({"project": proj, "returncode": res["returncode"]})
+
     log_path = am.up_log_path(instance)
     log_path.write_bytes(b"")
-    proc = am.launch_up_background(resolved, nginx_port, pull, recreate, log_path, instance)
+    proc = am.launch_up_background(resolved, nginx_port, pull, recreate, log_path, instance, features)
     started = _now_iso()
-    am.record_up(proc, resolved, nginx_port, instance, log_path, started)
+    am.record_up(proc, resolved, nginx_port, instance, log_path, started, features)
 
+    mailpit_url = ({"mailpit": f"http://localhost:{am.feature_host_ports(features, nginx_port)[0]}"}
+                   if "mailpit" in features and am.feature_host_ports(features, nginx_port) else {})
     return {
         "status": "starting",
         "version": resolved,
         "instance": instance,
+        "features": features,
         "project": am.project_for(instance),
         "port": nginx_port,
         "pid": proc.pid,
@@ -985,7 +1020,7 @@ def am_up(version: str = "latest", instance: str = "default", port: int = 0,
         "pull": pull,
         "recreate": recreate,
         "downed_conflicts": downed,
-        "urls": am.urls_for(nginx_port),
+        "urls": {**am.urls_for(nginx_port), **mailpit_url},
         "started": started,
         "next": f"Call am_wait(instance='{instance}') — it returns the moment the stack is healthy "
                 "(the mgmt API is slow, so don't sleep-loop; the wait handles it).",
@@ -1013,7 +1048,7 @@ def am_list() -> dict:
 @mcp.tool()
 def am_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
     """Stop an AM instance (`docker compose down`, volumes preserved)."""
-    result = am.run_down(timeout_seconds, instance)
+    result = am.run_down(timeout_seconds, instance, features=am.current_features(instance))
     am.forget_up(instance)
     if result["timed_out"]:
         return {"status": "timeout", "instance": instance, "message": f"down exceeded {timeout_seconds}s.",
@@ -1027,11 +1062,12 @@ def am_down(instance: str = "default", timeout_seconds: int = 180) -> dict:
 @mcp.tool()
 def am_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
     """Tail logs for one service of an AM instance."""
-    valid = am.service_names(instance)
+    feats = am.current_features(instance)
+    valid = am.service_names(instance, feats)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = am.compose_logs(service, lines, instance)
+    p = am.compose_logs(service, lines, instance, feats)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service,
             "instance": instance, "lines": lines, "returncode": p.returncode,
             "logs": p.stdout or p.stderr}
@@ -1040,8 +1076,9 @@ def am_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
 # ── Public Gamma stack (gamma_*) — self-contained, public images, no ACR ───────
 def _gamma_summarize(instance: str = "default") -> dict:
     up = gamma.up_process_status(instance)
-    rows = gamma.compose_ps(instance)
-    expected = gamma.service_names(instance)
+    feats = up.get("features") or gamma.current_features(instance)
+    rows = gamma.compose_ps(instance, feats)
+    expected = gamma.service_names(instance, feats)
     by = {}
     for r in rows:
         svc = r.get("Service") or r.get("Name", "?")
@@ -1075,17 +1112,19 @@ def _gamma_summarize(instance: str = "default") -> dict:
         "up_process": up,
         "services": [{"service": s, **{k: by.get(s, {}).get(k) for k in ("state", "health", "exit_code")},
                       "label": labels[s]} for s in expected],
+        "features": list(feats or []),
         "problems": [{"service": s, "label": labels[s]} for s in expected
                      if labels[s] in _BAD or labels[s] == "missing"],
-        "urls": gamma.urls_for(offset),
+        "urls": gamma.urls_for(offset, feats),
         "up_log_tail": runner.tail_file(gamma.up_log_path(instance), 40),
         "checked_at": _now_iso(),
     }
 
 
 @mcp.tool()
-def gamma_up(version: str = "latest", instance: str = "default", pull: bool = True,
-             recreate: bool = False, down_conflicting: bool = False, license: str = "") -> dict:
+def gamma_up(version: str = "latest", instance: str = "default", features: list = None,
+             pull: bool = True, recreate: bool = False, down_conflicting: bool = False,
+             license: str = "") -> dict:
     """Stand up the PUBLIC, self-contained Gravitee Gamma platform (background, non-blocking).
 
     Runs the customer-facing docker-compose from the Gravitee docs — PUBLIC Docker Hub images
@@ -1106,6 +1145,9 @@ def gamma_up(version: str = "latest", instance: str = "default", pull: bool = Tr
     Args:
         version: image tag — "latest"/"" → 4.12 (the published minor gamma-ui + apim share).
         instance: unique name to run several Gamma stacks at once (default "default").
+        features: composable overlays to layer on, e.g. ["mailpit"] (local SMTP capture so
+            registration/password-reset emails are exercisable). Ports shift with the instance
+            offset; drop a `gamma-feature-<name>.yml` in ~/.gravitee/stacker-features for a custom one.
         pull: pull images before up (default).
         recreate: `up -d --force-recreate`.
         down_conflicting: down any project holding this instance's ports first (no -v; data kept).
@@ -1115,6 +1157,13 @@ def gamma_up(version: str = "latest", instance: str = "default", pull: bool = Tr
     docker_err = runner.docker_running_error()
     if docker_err:
         return {"status": "blocked", "message": docker_err}
+    features = gamma.normalize_features(features)
+    bad = gamma.unknown_features(features)
+    if bad:
+        return {"status": "blocked",
+                "message": f"unknown feature(s) {bad}; built-in: {list(gamma.FEATURES)}. For a CUSTOM "
+                           f"feature, drop gamma-feature-<name>.yml into {gamma.features_dir()}.",
+                "features_dir": str(gamma.features_dir())}
     resolved, err = gamma.resolve_version(version)
     if err:
         return {"status": "blocked", "message": err}
@@ -1123,12 +1172,12 @@ def gamma_up(version: str = "latest", instance: str = "default", pull: bool = Tr
                 "message": f"Gamma instance '{instance}' is already running. Inspect gamma_status("
                            f"instance='{instance}'), stop with gamma_down(instance='{instance}'), or run a "
                            "SECOND stack as a named instance (e.g. instance='b')."}
-    offset = gamma.allocate_offset(instance)
+    offset = gamma.allocate_offset(instance, features)
     if offset is None:
         return {"status": "blocked",
                 "message": f"no free host-port band for a new Gamma instance (tried offsets up to "
                            f"{gamma.MAX_OFFSET}). Down an existing instance first (gamma_list to see them)."}
-    plan = gamma.plan_ports(offset)
+    plan = gamma.plan_ports(offset, features)
     ports = plan["ports"]
 
     warnings = []
@@ -1163,16 +1212,16 @@ def gamma_up(version: str = "latest", instance: str = "default", pull: bool = Tr
     license_path, license_src = gamma.resolve_license(license)
     log_path = gamma.up_log_path(instance)
     log_path.write_bytes(b"")
-    proc = gamma.launch_up_background(resolved, offset, pull, recreate, license_path, log_path, instance)
+    proc = gamma.launch_up_background(resolved, offset, pull, recreate, license_path, log_path, instance, features)
     started = _now_iso()
-    gamma.record_up(proc, resolved, offset, license_path, log_path, started, instance)
+    gamma.record_up(proc, resolved, offset, license_path, log_path, started, instance, features)
     return {
-        "status": "starting", "version": resolved, "instance": instance,
+        "status": "starting", "version": resolved, "instance": instance, "features": features,
         "project": gamma.project_for(instance), "mode": "coexist" if offset else "canonical",
         "port_offset": offset, "pid": proc.pid, "log_path": str(log_path), "pull": pull, "recreate": recreate,
         "license": {"mounted": bool(license_path), "path": license_path, "source": license_src,
                     "note": "optional — only Agent Management needs it; the rest run without."},
-        "downed_conflicts": downed, "ports": ports, "urls": gamma.urls_for(offset),
+        "downed_conflicts": downed, "ports": ports, "urls": gamma.urls_for(offset, features),
         "warnings": warnings, "started": started,
         "next": f"Call gamma_wait(instance='{instance}') — it returns the moment the stack is healthy "
                 "(or fails fast). Do NOT write your own sleep loop.",
@@ -1222,7 +1271,8 @@ def gamma_wait(instance: str = "default", timeout_seconds: int = 600, poll_secon
 @mcp.tool()
 def gamma_down(instance: str = "default", volumes: bool = False, timeout_seconds: int = 180) -> dict:
     """Stop a Gamma instance (`docker compose down`; volumes preserved). volumes=True → `down -v`."""
-    res = gamma.run_down(timeout_seconds, instance=instance, volumes=volumes)
+    feats = gamma.current_features(instance)
+    res = gamma.run_down(timeout_seconds, instance=instance, volumes=volumes, features=feats)
     gamma.forget_up(instance)
     status = "ok" if res.get("returncode") == 0 else ("timeout" if res.get("timed_out") else "error")
     return {"status": status, "instance": instance, "volumes_removed": volumes,
@@ -1232,11 +1282,12 @@ def gamma_down(instance: str = "default", volumes: bool = False, timeout_seconds
 @mcp.tool()
 def gamma_logs(service: str, lines: int = 100, instance: str = "default") -> dict:
     """Tail logs for one service of a Gamma instance (gateway, management_api, gamma_console, …)."""
-    valid = gamma.service_names(instance)
+    feats = gamma.current_features(instance)
+    valid = gamma.service_names(instance, feats)
     if service not in valid:
         return {"status": "invalid_service", "message": f"unknown service '{service}'.",
                 "valid_services": valid}
-    p = gamma.compose_logs(service, lines, instance)
+    p = gamma.compose_logs(service, lines, instance, feats)
     return {"status": "ok" if p.returncode == 0 else "error", "service": service, "instance": instance,
             "lines": lines, "returncode": p.returncode, "logs": p.stdout or p.stderr}
 

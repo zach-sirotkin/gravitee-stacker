@@ -1,0 +1,21 @@
+# Local SMTP capture (Mailpit) for the AM stack. Account flows that depend on email
+# (registration, forgotten-password, MFA-by-email) are captured in the Mailpit web UI
+# instead of going anywhere. SMTP :1025 stays internal (default network); only the web UI
+# is published (shifts with the instance's nginx-port delta).
+services:
+  am-mailpit:
+    image: axllent/mailpit:v1.31.0
+    restart: unless-stopped
+    ports:
+      - "${AM_MAILPIT_PORT:-8029}:8025"
+    environment:
+      - MP_SMTP_AUTH_ACCEPT_ANY=1
+      - MP_SMTP_AUTH_ALLOW_INSECURE=1
+
+  management:
+    environment:
+      - gravitee_email_enabled=true
+      - gravitee_email_host=am-mailpit
+      - gravitee_email_port=1025
+      - gravitee_email_from=noreply@gravitee.local
+      - gravitee_email_subject=[Gravitee.io] %s

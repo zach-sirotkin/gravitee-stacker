@@ -40,7 +40,7 @@ VARIANTS = ("default", "kafka")
 # base compose (OSS or kafka). Each adds a capability's service(s) + gateway env. They
 # attach to the `storage` network and reach apim-gateway by name. Coexist works because
 # the base + overlays are all port-parameterized (see _FEATURE_PORTS).
-FEATURES = ("prometheus", "redis-rate-limit", "debug-logging", "alert-engine")
+FEATURES = ("prometheus", "redis-rate-limit", "debug-logging", "alert-engine", "mailpit")
 
 # Features that need an EE license (like the kafka variant). alert-engine (AE) is EE.
 FEATURES_REQUIRING_LICENSE = ("alert-engine",)
@@ -57,6 +57,7 @@ _FEATURE_PORTS = {
     "redis-rate-limit": [],
     "debug-logging": [],
     "alert-engine": [("APIM_AE_MGMT_PORT", 18072)],  # AE node/management API (/_node/*)
+    "mailpit": [("APIM_MAILPIT_PORT", 8025)],         # Mailpit web UI (SMTP :1025 internal)
 }
 
 # Feature-level gotchas surfaced on apim_up (when the feature is layered on) + referenced
@@ -352,6 +353,8 @@ def plan_ports(offset: int, variant: str = "default", features=None) -> dict:
         urls["prometheus"] = eff["apim-prometheus"][0]
     if "alert-engine" in features and "apim-alert-engine" in eff:
         urls["alert-engine node API"] = eff["apim-alert-engine"][0]
+    if "mailpit" in features and "apim-mailpit" in eff:
+        urls["mailpit"] = eff["apim-mailpit"][0]
     return {"port_env": port_env, "ports": ports, "urls": urls}
 
 

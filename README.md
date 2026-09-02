@@ -84,7 +84,7 @@ only Agent Management needs one.
 
 | Tool           | What it does |
 | -------------- | ------------ |
-| `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `instance` (run several at once), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). |
+| `gamma_up`     | Pull public images + `docker compose up -d` in the background. Options: `version` (`latest`→4.12, or a pin), `instance` (run several at once), `features` (e.g. `["mailpit"]` — local SMTP capture), `pull`, `recreate`, `down_conflicting`, `license` (optional — Agent Management only). |
 | `gamma_wait`   | Block until healthy, then return at once (fails fast). Use after `gamma_up` instead of a sleep loop. Takes `instance`. |
 | `gamma_status` | Overall verdict + per-service health, version, project, URLs. Takes `instance`. |
 | `gamma_list`   | List tracked Gamma instances with status/version/ports/URLs (for coexist). |
@@ -130,6 +130,7 @@ combine cleanly and mix freely:
 | `redis-rate-limit` | points the gateway's rate-limit store at a bundled Redis | internal (no host port) |
 | `debug-logging` **(on by default)** | verbose `DEBUG` logs from the gateway + management-api (`io.gravitee` at DEBUG, via a bundled `logback-debug.xml`) | via `apim_logs` |
 | `alert-engine` **(EE license)** | Gravitee Alert Engine wired to the gateway **container-to-container** on the shared network (`ws_discovery=false`), so it receives gateway events. | node API on **:18072** (`/_node/*`); create alerts in the console |
+| `mailpit` | Local SMTP capture (Mailpit) + `email.enabled=true` on the management-api — so registration / password-reset / subscription emails are exercisable locally instead of silently no-oping. | Mailpit web UI on **:8025**; SMTP `:1025` internal |
 
 **Alert Engine — one gotcha to know.** After a **fresh-volume** start, restart the gateway
 once the stack is healthy — **`apim_alert_engine_fix(instance)`** — or alerts *silently*
@@ -202,7 +203,7 @@ host** (one port); everything else is internal.
 
 | Tool               | What it does                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------- |
-| `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.11.10"`), `instance` (run several at once), `port` (default `AM_NGINX_PORT` or 8086), `recreate=true`, `down_conflicting=true`. |
+| `am_up`            | Resolves + pins a release (`GIO_AM_VERSION`), checks the nginx port, starts AM in the background. On a port conflict returns `port_conflict`. Options: `version` (`"latest"` or e.g. `"4.11.10"`), `instance` (run several at once), `port` (default `AM_NGINX_PORT` or 8086), `features` (e.g. `["mailpit"]` — local SMTP for AM's registration/forgot-password/MFA-by-email flows), `recreate=true`, `down_conflicting=true`. |
 | `am_status`        | Overall verdict + per-service health, version, port, project, URLs. Takes `instance`. The management API is slow — status stays `partial` until its healthcheck passes, so wait for `healthy`. |
 | `am_wait`          | Block until the AM stack is healthy, then return at once (fails fast on error). Use it instead of a sleep loop after `am_up` — the slow mgmt-API healthcheck is exactly what it handles. |
 | `am_list`          | List all tracked AM instances with their status/version/port/URLs.                                |

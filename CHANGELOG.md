@@ -4,6 +4,23 @@ All notable changes to **gravitee-stacker** are documented here. The format is b
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-09-02
+
+### Added
+- **`mailpit` feature on all three stacks** — local SMTP capture (Mailpit) + `email.enabled`
+  on the management-api, so account flows that depend on email (registration, password
+  reset, subscription/MFA notifications) are exercisable locally instead of silently
+  no-opping. `apim_up(features=["mailpit"])`, `am_up(features=["mailpit"])`,
+  `gamma_up(features=["mailpit"])`. Mail lands in the Mailpit web UI (SMTP `:1025` internal).
+  Verified live: APIM end-to-end (password-reset mail delivered), AM (`EmailManager`
+  initialized against `am-mailpit`), Gamma (same management-api image + config validated).
+- **`features` system for AM and Gamma** — `am_up`/`gamma_up` gain a `features=[…]` param
+  mirroring APIM's (validated overlay set, `am-feature-*.yml` / `gamma-feature-*.yml`,
+  external `~/.gravitee/stacker-features` overlays win over bundled). New `gamma_list`
+  already shipped; feature ports shift with the instance (Gamma by offset band, AM by the
+  nginx-port delta) so they coexist. `*_down`/`*_logs`/`*_status` carry the instance's
+  features so overlay services are cleanly removed (no orphans) and shown.
+
 ## [0.9.1] — 2026-08-29
 
 ### Added

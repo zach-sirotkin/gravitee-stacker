@@ -28,6 +28,55 @@ AM_NGINX_CONF = _HERE / "am-nginx.conf"
 AM_REPO = "https://github.com/gravitee-io/gravitee-access-management.git"
 DEFAULT_NGINX_PORT = 8086
 
+# Composable feature overlays (`am-feature-<name>.yml`), layered onto am-compose.yml with
+# `-f`. AM has no offset bands (one nginx port), so a feature host port shifts by the
+# nginx-port delta from the canonical 8086 — keeping coexisting instances conflict-free.
+FEATURES = ("mailpit",)
+_FEATURE_PORTS = {"mailpit": [("AM_MAILPIT_PORT", 8029)]}  # web UI; SMTP :1025 internal
+
+
+def features_dir() -> Path:
+    return Path(os.environ.get("APIM_FEATURES_DIR")
+                or Path.home() / ".gravitee" / "stacker-features").expanduser()
+
+
+def normalize_features(features) -> list[str]:
+    seen, out = set(), []
+    for f in (features or []):
+        f = (f or "").strip()
+        if f and f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def feature_compose(name: str) -> Path:
+    """Overlay file for a feature. A user overlay in features_dir() wins over a bundled one."""
+    ext = features_dir() / f"am-feature-{name}.yml"
+    return ext if ext.is_file() else _HERE / f"am-feature-{name}.yml"
+
+
+def is_known_feature(name: str) -> bool:
+    return name in FEATURES or (features_dir() / f"am-feature-{name}.yml").is_file()
+
+
+def unknown_features(features) -> list[str]:
+    return [f for f in normalize_features(features) if not is_known_feature(f)]
+
+
+def feature_port_env(features, nginx_port: int) -> dict:
+    """Env vars for feature host ports, shifted by the nginx-port delta from canonical."""
+    shift = nginx_port - DEFAULT_NGINX_PORT
+    return {var: str(default + shift)
+            for f in normalize_features(features) for var, default in _FEATURE_PORTS.get(f, [])}
+
+
+def feature_host_ports(features, nginx_port: int) -> list[int]:
+    """Feature host ports (for conflict detection), shifted like feature_port_env."""
+    shift = nginx_port - DEFAULT_NGINX_PORT
+    return [default + shift
+            for f in normalize_features(features) for _, default in _FEATURE_PORTS.get(f, [])]
+
 
 # ── paths / project / env ─────────────────────────────────────────────────────
 def am_state_dir() -> Path:
@@ -57,8 +106,11 @@ def compose_file() -> Path:
     return AM_COMPOSE
 
 
-def compose_args(instance: str = "default") -> list[str]:
-    return ["-p", project_for(instance), "-f", str(compose_file())]
+def compose_args(instance: str = "default", features=None) -> list[str]:
+    args = ["-p", project_for(instance), "-f", str(compose_file())]
+    for f in normalize_features(features):
+        args += ["-f", str(feature_compose(f))]
+    return args
 
 
 def default_port() -> int:
@@ -87,12 +139,14 @@ def allocate_port(instance: str, requested: int = 0) -> Optional[int]:
     return None
 
 
-def _env(version: str = "latest", port: Optional[int] = None, extra: Optional[dict] = None) -> dict:
+def _env(version: str = "latest", port: Optional[int] = None, features=None,
+         extra: Optional[dict] = None) -> dict:
     env = runner._child_env()
     env["GIO_AM_VERSION"] = version
     env["AM_NGINX_CONF"] = str(AM_NGINX_CONF)
     if port is not None:
         env["AM_NGINX_PORT"] = str(port)
+    env.update(feature_port_env(features, port if port is not None else DEFAULT_NGINX_PORT))
     if extra:
         env.update(extra)
     return env
@@ -124,10 +178,10 @@ def resolve_version(version: Optional[str]) -> tuple[Optional[str], Optional[str
 
 
 # ── docker compose introspection ──────────────────────────────────────────────
-def compose_ps(instance: str = "default") -> list[dict]:
+def compose_ps(instance: str = "default", features=None) -> list[dict]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(instance), "ps", "--all", "--format", "json"],
-        cwd=str(am_state_dir()), env=_env("latest", default_port()),
+        ["docker", "compose", *compose_args(instance, features), "ps", "--all", "--format", "json"],
+        cwd=str(am_state_dir()), env=_env("latest", default_port(), features),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0 or not p.stdout.strip():
@@ -148,19 +202,19 @@ def compose_ps(instance: str = "default") -> list[dict]:
     return rows
 
 
-def compose_logs(service: str, lines: int, instance: str = "default") -> subprocess.CompletedProcess:
+def compose_logs(service: str, lines: int, instance: str = "default", features=None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", *compose_args(instance), "logs", "--no-color",
+        ["docker", "compose", *compose_args(instance, features), "logs", "--no-color",
          f"--tail={lines}", service],
-        cwd=str(am_state_dir()), env=_env("latest", default_port()),
+        cwd=str(am_state_dir()), env=_env("latest", default_port(), features),
         capture_output=True, text=True, timeout=60,
     )
 
 
-def service_names(instance: str = "default") -> list[str]:
+def service_names(instance: str = "default", features=None) -> list[str]:
     p = subprocess.run(
-        ["docker", "compose", *compose_args(instance), "config", "--services"],
-        cwd=str(am_state_dir()), env=_env("latest", default_port()),
+        ["docker", "compose", *compose_args(instance, features), "config", "--services"],
+        cwd=str(am_state_dir()), env=_env("latest", default_port(), features),
         capture_output=True, text=True, timeout=30,
     )
     if p.returncode != 0:
@@ -205,8 +259,8 @@ def down_project(project: str) -> dict:
 
 # ── up / down lifecycle ───────────────────────────────────────────────────────
 def launch_up_background(version: str, port: int, pull: bool, recreate: bool,
-                         log_path: Path, instance: str = "default") -> subprocess.Popen:
-    files = " ".join(shlex.quote(a) for a in compose_args(instance))
+                         log_path: Path, instance: str = "default", features=None) -> subprocess.Popen:
+    files = " ".join(shlex.quote(a) for a in compose_args(instance, features))
     up = f"docker compose {files} up -d" + (" --force-recreate" if recreate else "")
     cmd = (f"docker compose {files} pull && {up}") if pull else up
 
@@ -214,7 +268,7 @@ def launch_up_background(version: str, port: int, pull: bool, recreate: bool,
     fh = open(log_path, "wb")
     try:
         proc = subprocess.Popen(
-            ["bash", "-c", cmd], cwd=str(am_state_dir()), env=_env(version, port),
+            ["bash", "-c", cmd], cwd=str(am_state_dir()), env=_env(version, port, features),
             stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -223,11 +277,11 @@ def launch_up_background(version: str, port: int, pull: bool, recreate: bool,
     return proc
 
 
-def run_down(timeout: int, instance: str = "default") -> dict:
+def run_down(timeout: int, instance: str = "default", features=None) -> dict:
     try:
         p = subprocess.run(
-            ["docker", "compose", *compose_args(instance), "down"],
-            cwd=str(am_state_dir()), env=_env("latest", default_port()),
+            ["docker", "compose", *compose_args(instance, features), "down"],
+            cwd=str(am_state_dir()), env=_env("latest", default_port(), features),
             capture_output=True, text=True, timeout=timeout,
         )
         return {"timed_out": False, "returncode": p.returncode,
@@ -255,6 +309,7 @@ class AmUp:
     version: str
     port: int
     instance: str = "default"
+    features: Optional[list] = None
     project: Optional[str] = None
     compose: Optional[str] = None
     started: Optional[str] = None
@@ -266,9 +321,9 @@ _recs: dict[str, AmUp] = {}
 
 
 def record_up(proc: subprocess.Popen, version: str, port: int, instance: str,
-              log_path: Path, started: Optional[str]) -> AmUp:
+              log_path: Path, started: Optional[str], features=None) -> AmUp:
     rec = AmUp(pid=proc.pid, log_path=str(log_path), version=version, port=port,
-               instance=instance, project=project_for(instance),
+               instance=instance, features=list(features or []), project=project_for(instance),
                compose=str(compose_file()), started=started)
     _procs[instance] = proc
     _recs[instance] = rec
@@ -303,7 +358,7 @@ def up_process_status(instance: str = "default") -> dict:
     if rec is None:
         return {"tracked": False}
     common = {"pid": rec.pid, "version": rec.version, "port": rec.port, "instance": rec.instance,
-              "project": rec.project, "compose": rec.compose,
+              "features": list(rec.features or []), "project": rec.project, "compose": rec.compose,
               "log_path": rec.log_path, "started": rec.started}
     proc = _procs.get(instance)
     if proc is not None:
@@ -331,6 +386,11 @@ def current_port(instance: str = "default") -> int:
 def current_version(instance: str = "default") -> Optional[str]:
     rec = _rec_for(instance)
     return rec.version if rec else None
+
+
+def current_features(instance: str = "default") -> list[str]:
+    rec = _rec_for(instance)
+    return list(rec.features or []) if rec else []
 
 
 def known_instances() -> list[str]:
