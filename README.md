@@ -243,12 +243,15 @@ apim_config(instance="default", action="reset")   # delete override + recreate �
   **hidden defaults** you never set (e.g. `email.enabled: false` — the reason the [`mailpit`
   feature](#composable-features) has to flip it). Pass **`full=True`** to also dump each
   service's in-image `gravitee.yml` as a read-only reference so those defaults are visible.
-- The **full rendered compose** (`<project>.rendered-compose.yml`) — every service / image /
-  port / volume / network + all env, fully interpolated (like `docker compose config`) — is
-  **written automatically on every `*_up`**, refreshed on config `apply`/`reset`, and **deleted
-  on `*_down`**. So if the file is there it matches the live stack (never stale); it's the whole
-  stack the thin override layer doesn't repeat. Pass **`compose=True`** to force-refresh it on
-  demand, or set `STACKER_COMPOSE_DUMP=0` to turn the auto-dump off.
+- A **read-only full-compose snapshot** (`<project>.compose-snapshot.yml`) — every service /
+  image / port / volume / network + all env, fully interpolated (like `docker compose config`)
+  — is **written automatically on every `*_up`**, refreshed on config `apply`/`reset`, and
+  **deleted on `*_down`**. So if the file is there it matches the live stack (never stale); it's
+  the whole stack the thin override diff doesn't repeat. It is **not** editable — it's a frozen
+  picture (regenerating it would clobber edits); change config via the `.override.yml` next to
+  it. Pass **`compose=True`** to force-refresh it on demand, or `STACKER_COMPOSE_DUMP=0` to turn
+  the auto-snapshot off. So each running stack lands two files: `<project>.override.yml` (edit
+  this) and `<project>.compose-snapshot.yml` (look only).
 - Gravitee resolves config at **startup**, so "on the fly" means edit → recreate (fast), not a
   live hot-reload.
 
@@ -414,8 +417,8 @@ via `docker compose config --services`, so it never drifts from the actual compo
 | `AM_NGINX_PORT`  | `8086`                                                     | Default host port for the AM stack's nginx (overridden by `am_up`'s `port` arg). |
 | `AM_COMPOSE_FILE` | shipped `am-compose.yml`                                  | Point at your own AM compose instead of the bundled one. |
 | `APIM_FEATURES_DIR` | `~/.gravitee/stacker-features`                          | Where custom feature overlays (`<stack>-feature-<name>.yml`) live — your overlays win over bundled ones. |
-| `STACKER_CONFIG_DIR` | `~/.gravitee/stacker-config`                           | Where `*_config` writes the editable per-project override files + the auto rendered-compose dump. |
-| `STACKER_COMPOSE_DUMP` | `1` (on)                                              | Set to `0`/`false` to stop auto-writing `<project>.rendered-compose.yml` on every up. |
+| `STACKER_CONFIG_DIR` | `~/.gravitee/stacker-config`                           | Where `*_config` writes the editable per-project override files + the read-only compose snapshots. |
+| `STACKER_COMPOSE_DUMP` | `1` (on)                                              | Set to `0`/`false` to stop auto-writing the `<project>.compose-snapshot.yml` on every up. |
 | `GAMMA_MCP_STATE_DIR` | `<this project>/.run`                                 | Where the tracked up-process metadata + `up.log` live (per stack). The daily-use install points this at `~/.gravitee/stacker-run`. |
 
 **Customizing the APIM stack.** The shipped `apim-compose.yml` is a plain compose

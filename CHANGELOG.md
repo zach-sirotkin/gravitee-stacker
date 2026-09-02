@@ -7,15 +7,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.10.1] — 2026-09-02
 
 ### Added
-- **Rendered compose is now an automatic lifecycle artifact.** Every `*_up` writes
-  `~/.gravitee/stacker-config/<project>.rendered-compose.yml` — the complete effective compose
+- **Read-only full-compose snapshot, auto-produced per stack.** Every `*_up` writes
+  `~/.gravitee/stacker-config/<project>.compose-snapshot.yml` — the complete effective compose
   (`docker compose config` YAML): every service / image / port / volume / network + all env,
   fully interpolated from the base compose + feature overlays + license + config override.
-  - **No staleness:** it's refreshed on config `apply`/`reset` and **deleted on `*_down`**, so
-    the file exists only while its stack is tracked and always matches the live config.
-  - Header banner states the lifecycle. Opt out with `STACKER_COMPOSE_DUMP=0`.
-  - `*_config(compose=True)` still works — it now just **force-refreshes** the same file on
-    demand (e.g. after manual `docker` changes). New `rendered_compose()` per stack module.
+  - **Read-only by design** — it's a frozen snapshot, not the config source (regenerating it
+    would clobber edits). Config still lives in the editable `<project>.override.yml` diff,
+    which survives version/feature/coexist changes. Named `compose-snapshot` (vs `override`)
+    and headed with a ⚠ banner so the two files are unmistakable side by side.
+  - **No staleness:** refreshed on config `apply`/`reset` and **deleted on `*_down`**, so it
+    exists only while its stack is tracked and always matches the live config.
+  - `*_config(compose=True)` force-refreshes the snapshot on demand. Opt out entirely with
+    `STACKER_COMPOSE_DUMP=0`. New `rendered_compose()` per stack module.
 
 ## [0.10.0] — 2026-09-02
 
